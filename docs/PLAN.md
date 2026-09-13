@@ -1,6 +1,8 @@
 # PLAN — TraderY — For LLM agents
 
 > Goal: make paper mode honest BEFORE adding any live broker. Do not add `broker-oanda`, real news, or analytics until P0 is green. Work in order P0 -> P1 -> P2. Each task lists files to touch, exact acceptance criteria, and how to verify.
+>
+> STATUS 2026-09-13: P0 DONE (14 tests green) + P1-1 DONE (19 tests: 9 broker-paper + 7 agent-runtime + 3 persistence). Crash resume via `--resume` works e2e. Next: P1-2.
 
 ## Global rules (obey on every task)
 
@@ -10,45 +12,36 @@
 - `R4` Run `cargo test` and `cargo build -p orchestrator` after every task. No `cargo run` with `mode="live"`.
 - `R5` Update `docs/CODEMAP.md:G1-G8` and `README.md` caveats when behavior changes.
 
-## P0 — Honest paper (do first, blocks everything else)
+## P0 — Honest paper ✅ DONE 2026-09-13 (14 tests: 8 broker-paper + 6 agent-runtime)
 
-### P0-1 Fix PaperBroker flip + margin
-- Touch: `broker-paper/src/lib.rs:37-84`
-- Do:
-  1. Add `margin_required(order, price)` — at minimum reject `Sell` if `units * price > balance * max_leverage` (start `max_leverage=1.0` for spot-parity, make configurable).
-  2. On flip (sign change with leftover): set `avg_entry_price = fill_price` for the leftover/new side. On partial close without flip: keep old avg. On flat: reset to 0.0.
-  3. Add `withdraw(amount)` seam to `Broker` trait in `core/src/lib.rs:102` with default no-op, implement for real in `PaperBroker` (subtract from `balance`, error if insufficient).
-- Accept: unit tests prove (a) long 1000 @1.10 with $50 rejects, (b) short 1000 with $50 rejects at 1x, (c) long 1000 -> sell 2000 leaves short priced at new fill, not old entry.
-- Verify: `cargo test -p broker-paper`
+### P0-1 Fix PaperBroker flip + margin ✅ DONE
+- Landed: `broker-paper/src/lib.rs:44-148` exposure-based margin both sides (1x default, `with_max_leverage()`), closes always pass; flip resets entry, partial close keeps avg; `Broker::withdraw()` seam in `core/src/lib.rs:127` (loud default), cash-only impl in paper.
+- Evidence: `buy_rejects_when_notional_exceeds_balance`, `sell_rejects_without_margin_cover`, `flip_resets_entry_to_new_fill`, `partial_close_keeps_average_entry`, `closing_order_always_allowed_so_sltp_can_exit`, `withdraw_reduces_balance_and_rejects_overdraft` (+2 more).
+- Verify: `cargo test -p broker-paper` green.
 
-### P0-2 Fix split to move money + stop loop
-- Touch: `agent-runtime/src/lib.rs:194-200`, `core/src/lib.rs:102` (new `withdraw`), `orchestrator/src/main.rs:218-234` (print withdrawn vs equity)
-- Do:
-  1. Call `broker.withdraw(withdrawn)` on split. On failure, emit `OrderRejected` and do NOT advance `baseline`.
-  2. Set `baseline = broker.account_state().equity` AFTER withdraw (not `equity/2` pre-withdraw).
-  3. Ensure split fires at most once per crossing (require `equity >= baseline*2` with new post-withdraw baseline).
-- Accept: test starts $100, forces equity $200, ticks once -> broker equity ~$100, `total_withdrawn` $100, next tick with flat price emits NO second split.
-- Verify: `cargo test -p agent-runtime`
+### P0-2 Fix split to move money + stop loop ✅ DONE
+- Landed: `agent-runtime/src/lib.rs:194-215` calls `broker.withdraw(equity/2)`, baseline = post-withdraw equity, strict `>` guard; deferral via `OrderRejected` when cash insufficient.
+- Evidence: `split_fires_once_and_resets_baseline`, `split_defers_while_profit_is_unrealized`.
+- Verify: `cargo test -p agent-runtime` green.
 
-### P0-3 Gate live mode honestly
-- Touch: `orchestrator/src/main.rs:56-60,72-105`, `trading-config/src/lib.rs:35-46`
-- Do: if `mode="live"` and no `LiveBroker` feature/crate exists, `eprintln!` + `exit(1)` with "no live broker compiled in — refusing to run". Keep current skip-LLM behavior as secondary. Update `README.md:118-119` to say live is currently disabled, not risky.
-- Accept: `mode="live"` exits non-zero with clear message; `mode="test"` unaffected.
-- Verify: `cargo run -p orchestrator -- config.toml` still works; live config exits.
+### P0-3 Gate live mode honestly ✅ DONE
+- Landed: `orchestrator/src/main.rs:58-62` exits 1 on `mode="live"`; `README.md` caveat rewritten.
+- Evidence: live config exits 1 with gate message; 5-tick test config exits 0.
+- Verify: manual run (see above).
 
-### P0-4 Tests for fill/SL-TP/death/split (the product logic)
-- Touch: NEW `broker-paper/src/tests.rs` or inline `#[cfg(test)]`, NEW `agent-runtime/src/tests.rs`
-- Do minimum 8 tests:
-  1. buy-reject-insufficient, 2. sell-reject-no-margin, 3. add-to-position-weighted-avg, 4. partial-close-keeps-avg, 5. flip-resets-entry, 6. SL-fires-before-strategy, 7. TP-fires-before-strategy, 8. split-once-no-loop + death-at-zero.
-- Accept: `cargo test` all green. This is the exit gate for P0.
+### P0-4 Tests for fill/SL-TP/death/split ✅ DONE (exit gate met)
+- Landed: inline `#[cfg(test)]` in `broker-paper/src/lib.rs:151` (8) + `agent-runtime/src/lib.rs:216` (6).
+- Verify: `cargo test` all green.
 
-## P1 — Crash safety + inventory-aware strategies (do second)
+## P1 — Crash safety + inventory-aware strategies (do now, in order)
 
-### P1-1 Replay/reconcile
-- Touch: `persistence/src/lib.rs:57`, `agent-runtime/src/lib.rs:100-104`, `orchestrator/src/main.rs:68-105`
-- Do: on startup, `read_all()` last `run-*.jsonl`, reconstruct `baseline/total_withdrawn/open_units` per agent, pass to `Agent::new()` or new `Agent::restore()`. For paper, restore in-memory; for future live, call `reconcile()` to overwrite with broker truth.
-- Accept: kill -9 mid-run, restart with same log dir -> no duplicate position, baseline preserved. Test with synthetic log file.
-- Verify: `cargo test -p persistence && cargo test -p agent-runtime`
+Agreed algo direction (educational, not advice): one strategy per agent per symbol from a registry — RSI / Donchian-breakout / ATR sizer + news-gate wrapper; LLM as regime router, algos as executors, risk layer unchanged. No spot-FX whale tracking (no consolidated tape).
+
+### P1-1 Replay/reconcile ✅ DONE
+- Landed: `snapshot` records every `snapshot_every_n_ticks` (default 50, 0 disables; old configs parse via serde default) + full-state `final_summary`; `persistence::{latest_run_file, load_snapshots, Snapshot}` (dead agents never resurrect); `PaperBroker::restore()` (validates position/entry match); `Agent::restore()` + `baseline()`; orchestrator `--resume` rebuilds from newest `data/run-*.jsonl` (loaded BEFORE the new log file is created); fixed-stake (`min==max`) `gen_range` panic found during testing.
+- Known limits: crash window = up to N ticks; strategy internals (SMA memory) rebuild over ticks; corrupt snapshots fall back to fresh with a warning.
+- Evidence: 3 persistence tests (round-trip+corrupt-skip, fold/latest-wins/no-resurrect, newest-file); `restore_*` tests in broker/agent; e2e fresh 6-tick run → `--resume` run prints `Resuming 'x' — balance=...` with prior balances.
+- Verify: `cargo test -p persistence && cargo test -p agent-runtime` green.
 
 ### P1-2 Inventory-aware SMA
 - Touch: `strategy-sma/src/lib.rs:41-58`
@@ -60,12 +53,39 @@
 - Do: count `Lagged(n)` per agent, emit `OrderRejected("tick-lag-skipped")` or log metric; change producer to per-symbol feeds (`HashMap<symbol, MockFeed>`) instead of `agents[0].symbol`.
 - Accept: multi-symbol config fans out correctly; lag no longer silent.
 
-## P2 — Sellable hardening (do last)
+## P2 — Sellable hardening (do last, demo-first, Rust-only)
 
-- `P2-1` Decimal money (`rust_decimal`), spread+commission config per symbol.
-- `P2-2` Performance analytics from event log (Sharpe, max drawdown, win rate) — offline binary reading `read_all()`.
+Promotion ladder (no skipping steps): internal paper (`PaperBroker`) →
+venue demo/practice account (real matching engine, fake money) → venue
+live (real money). Each venue adapter serves demo AND live from one
+crate via config (`base_url` + `api_key` + `account_id` + `allow_live`).
+`mode="live"` stays refused until at least one venue adapter + P1
+replay + stats thresholds exist. Hot path stays sync in-process Rust;
+all network I/O (broker REST/WS, news polling, LLM calls) on spawned
+tasks with timeouts + cooldowns — the zero-latency principle.
+
+- `P2-1` Decimal money (`rust_decimal`), per-venue `min_units` /
+  `min_notional` / spread / commission in config. Paper simulates them
+  so a $100 stake is validated per venue BEFORE any demo run (many
+  brokers min 1000 units ≈ $1100 notional — incompatible; OANDA-style
+  1-unit minimums fit).
+- `P2-2` Performance analytics + trackers (`analytics` crate, offline,
+  reads logs via `read_all()`): equity curve, Sharpe/Sortino, max
+  drawdown, win rate, profit factor, exposure — broken down per
+  agent / symbol / strategy. Plus a log-tailing live tracker for the
+  console. Promotion demo→live requires green thresholds here.
 - `P2-3` Real `licensing::check()` signature verification (Ed25519 offline).
-- `P2-4` `broker-oanda` crate implementing `Broker` + real `reconcile()` querying open positions.
+- `P2-4` Venue adapters, one crate each implementing `Broker` + real
+  `reconcile()` (query open positions/orders on startup): start with
+  `broker-oanda` (practice + live base URLs), then next venue by demand.
+  Each lands with its demo config + recorded demo-run stats first.
+- `P2-5` World-info feeds, one crate each implementing `NewsFeed`:
+  economic calendar first (rates/CPI/NFP drive FX more than headlines),
+  then headline APIs (e.g. Finnhub/AlphaVantage-style) with LLM
+  sentiment scoring behind the existing `strategy-llm` pattern. Feed
+  failures degrade to neutral (like the LLM cooldown) and never block
+  trading. Powers the P1-2 news-gate (pause/reduce into high-impact
+  events) and the LLM router.
 
 ## Explicit non-goals (do NOT do in P0/P1)
 

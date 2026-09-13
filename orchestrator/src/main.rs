@@ -3,8 +3,9 @@ use broker_paper::PaperBroker;
 use chrono::Utc;
 use feed_mock::MockFeed;
 use news_mock::MockNewsFeed;
-use persistence::{EventLog, EventRecord};
+use persistence::{latest_run_file, load_snapshots, EventLog, EventRecord, Snapshot};
 use rand::Rng;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +25,27 @@ struct TickMsg {
 
 enum LogMsg {
     Event { agent_id: String, tick: u32, event: AgentEvent },
-    Final { agent_id: String, status: AgentStatus, equity: f64, withdrawn: f64 },
+    /// Periodic restorable state (see P1-1). Written every
+    /// `snapshot_every_n_ticks`; crash window = up to N ticks.
+    Snapshot {
+        agent_id: String,
+        tick: u32,
+        balance: f64,
+        open_units: f64,
+        entry_price: Option<f64>,
+        baseline: f64,
+        withdrawn: f64,
+    },
+    Final {
+        agent_id: String,
+        status: AgentStatus,
+        equity: f64,
+        withdrawn: f64,
+        balance: f64,
+        open_units: f64,
+        entry_price: Option<f64>,
+        baseline: f64,
+    },
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -44,7 +65,16 @@ async fn main() {
     }
 
     // --- Load config (agents are defined in config.toml, not code) ---
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".to_string());
+    // Usage: orchestrator [config.toml] [--resume]
+    // --resume rebuilds agents from the newest data/run-*.jsonl instead
+    // of fresh stakes. Without it, every run starts fresh.
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    let resume = cli_args.iter().any(|a| a == "--resume");
+    let config_path = cli_args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_else(|| "config.toml".to_string());
     let config = match RunConfig::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -59,6 +89,34 @@ async fn main() {
         std::process::exit(1);
     }
     let is_live = matches!(config.mode, Mode::Live);
+
+    // --- Crash recovery (P1-1): opt-in resume from the newest log ---
+    // Without --resume every run starts fresh (current behavior).
+    // With --resume, per-agent broker/baseline/withdrawn state is rebuilt
+    // from the latest snapshot/final_summary; dead agents stay dead and
+    // start fresh. Strategy internals (SMA memory) rebuild over ticks.
+    // NOTE: this MUST run before the new event log file is created below,
+    // or "latest" would be the empty file of this very run.
+    let snapshots: HashMap<String, Snapshot> = if resume {
+        match latest_run_file("data") {
+            Some(path) => match load_snapshots(&path) {
+                Ok(map) => {
+                    println!("Resuming from {} ({} agent(s) with state)\n", path.display(), map.len());
+                    map
+                }
+                Err(e) => {
+                    eprintln!("Cannot read {}: {e} — starting fresh.", path.display());
+                    HashMap::new()
+                }
+            },
+            None => {
+                println!("--resume given but data/ has no runs yet — starting fresh.\n");
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
 
     // --- Durable event log ---
     let run_id = Utc::now().format("%Y%m%dT%H%M%S").to_string();
@@ -81,7 +139,11 @@ async fn main() {
             continue;
         }
 
-        let stake: f64 = rng.gen_range(spec.stake_min..spec.stake_max);
+        let stake: f64 = if spec.stake_max > spec.stake_min {
+            rng.gen_range(spec.stake_min..spec.stake_max)
+        } else {
+            spec.stake_min // fixed stake (min == max) must not panic gen_range
+        };
         let strategy: Box<dyn trading_core::Strategy> = match &spec.strategy {
             StrategySpec::Sma { fast, slow } => {
                 Box::new(SmaCrossover::new(spec.id.clone(), *fast, *slow, spec.units))
@@ -94,7 +156,34 @@ async fn main() {
             }
         };
 
-        let mut agent = Agent::new(spec.id.clone(), spec.symbol.clone(), strategy, Box::new(PaperBroker::new(stake)), stake);
+        let mut agent = match snapshots.get(&spec.id) {
+            Some(snap) => {
+                match PaperBroker::restore(snap.balance, snap.open_units, snap.entry_price.unwrap_or(0.0)) {
+                    Ok(broker) => {
+                        println!(
+                            "Resuming '{}' — balance=${:.2} open_units={} baseline=${:.2} withdrawn_total=${:.2}",
+                            spec.id, snap.balance, snap.open_units, snap.baseline, snap.withdrawn
+                        );
+                        Agent::restore(
+                            spec.id.clone(),
+                            spec.symbol.clone(),
+                            strategy,
+                            Box::new(broker),
+                            snap.baseline,
+                            snap.withdrawn,
+                        )
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Snapshot for '{}' corrupt ({e}) — starting fresh with ${stake:.2}.",
+                            spec.id
+                        );
+                        Agent::new(spec.id.clone(), spec.symbol.clone(), strategy, Box::new(PaperBroker::new(stake)), stake)
+                    }
+                }
+            }
+            None => Agent::new(spec.id.clone(), spec.symbol.clone(), strategy, Box::new(PaperBroker::new(stake)), stake),
+        };
         if let Some(sl) = spec.stop_loss_pct {
             agent = agent.with_stop_loss(sl);
         }
@@ -116,6 +205,7 @@ async fn main() {
     let alive_count = Arc::new(AtomicUsize::new(agents.len()));
 
     let mut handles = Vec::new();
+    let snapshot_every = config.snapshot_every_n_ticks;
     for agent in agents {
         let mut rx = tick_tx.subscribe();
         let log_tx = log_tx.clone();
@@ -140,6 +230,21 @@ async fn main() {
                                 alive_count.fetch_sub(1, Ordering::SeqCst);
                             }
                         }
+                        // Periodic restorable snapshot (P1-1). Dead agents
+                        // stop here via `continue` above, so only the live
+                        // ones checkpoint; death is recorded via died/final.
+                        if snapshot_every > 0 && msg.tick % snapshot_every == 0 {
+                            let st = agent.account_state();
+                            let _ = log_tx.send(LogMsg::Snapshot {
+                                agent_id: agent_id.clone(),
+                                tick: msg.tick,
+                                balance: st.balance,
+                                open_units: st.open_units,
+                                entry_price: st.entry_price,
+                                baseline: agent.baseline(),
+                                withdrawn: agent.total_withdrawn,
+                            });
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -151,6 +256,10 @@ async fn main() {
                 status: agent.status(),
                 equity: state.equity,
                 withdrawn: agent.total_withdrawn,
+                balance: state.balance,
+                open_units: state.open_units,
+                entry_price: state.entry_price,
+                baseline: agent.baseline(),
             });
         });
         handles.push(handle);
@@ -168,14 +277,34 @@ async fn main() {
                     print_event(&agent_id, tick, &event);
                     persist_event(&logger_event_log, &logger_run_id, &agent_id, tick, &event);
                 }
-                LogMsg::Final { agent_id, status, equity, withdrawn } => {
+                LogMsg::Snapshot { agent_id, tick, balance, open_units, entry_price, baseline, withdrawn } => {
+                    let record = EventRecord {
+                        ts: Utc::now(),
+                        run_id: logger_run_id.clone(),
+                        agent_id: agent_id.clone(),
+                        tick,
+                        kind: "snapshot".to_string(),
+                        data: serde_json::json!({
+                            "balance": balance, "open_units": open_units,
+                            "entry_price": entry_price, "baseline": baseline,
+                            "withdrawn": withdrawn,
+                        }),
+                    };
+                    let _ = logger_event_log.append(&record);
+                }
+                LogMsg::Final { agent_id, status, equity, withdrawn, balance, open_units, entry_price, baseline } => {
                     let record = EventRecord {
                         ts: Utc::now(),
                         run_id: logger_run_id.clone(),
                         agent_id: agent_id.clone(),
                         tick: 0,
                         kind: "final_summary".to_string(),
-                        data: serde_json::json!({ "status": format!("{status:?}"), "equity": equity, "withdrawn": withdrawn }),
+                        data: serde_json::json!({
+                            "status": format!("{status:?}"), "equity": equity,
+                            "withdrawn": withdrawn, "balance": balance,
+                            "open_units": open_units, "entry_price": entry_price,
+                            "baseline": baseline,
+                        }),
                     };
                     let _ = logger_event_log.append(&record);
                     finals.push((agent_id, status, equity, withdrawn));

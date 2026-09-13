@@ -6,3 +6,8 @@ edition = "2021"
 [dependencies]
 trading-core = { path = "../core" }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+chrono = { workspace = true }
+broker-paper = { path = "../broker-paper" }

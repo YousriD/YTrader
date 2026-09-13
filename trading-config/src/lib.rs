@@ -14,7 +14,7 @@ pub enum StrategySpec {
     /// Pure algorithmic SMA crossover.
     Sma { fast: usize, slow: usize },
     /// LLM-driven, always wrapped in a Hybrid with an SMA fallback.
-    /// Ignored entirely when `mode = "live"` — see RunConfig doc.
+    /// Requires ANTHROPIC_API_KEY at runtime, else the agent is skipped.
     Llm { persona: String, fallback_fast: usize, fallback_slow: usize },
 }
 
@@ -35,15 +35,22 @@ pub struct AgentSpec {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunConfig {
     /// "test" = paper trading only, always safe.
-    /// "live" = real broker adapter. Any agent whose strategy is `llm`
-    /// is silently excluded in live mode — this is enforced by the
-    /// orchestrator regardless of what's in this file, so a config
-    /// mistake can never put an LLM in charge of real money.
+    /// "live" = refused by the orchestrator until a real broker adapter
+    /// exists (see docs/PLAN.md:P0-3). No silent paper-as-live, ever.
     pub mode: Mode,
     pub ticks: u32,
     pub tick_delay_ms: u64,
     pub news_every_n_ticks: u32,
+    /// Persist a per-agent `snapshot` record every N ticks so a restart
+    /// with `--resume` can rebuild broker/baseline state. Crash window =
+    /// up to N ticks of history. Defaults to 50; set 0 to disable.
+    #[serde(default = "default_snapshot_every")]
+    pub snapshot_every_n_ticks: u32,
     pub agents: Vec<AgentSpec>,
+}
+
+fn default_snapshot_every() -> u32 {
+    50
 }
 
 impl RunConfig {

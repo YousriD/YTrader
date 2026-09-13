@@ -1,7 +1,8 @@
-mode = "test"           # "test" or "live" — see README before ever using "live"
+mode = "test"           # "test" or "live" — live refuses to run until a real broker exists
 ticks = 500
 tick_delay_ms = 50
 news_every_n_ticks = 15
+snapshot_every_n_ticks = 50  # per-agent state checkpoint; crash window = up to N ticks (0 disables)
 
 [[agents]]
 id = "algo-fast"

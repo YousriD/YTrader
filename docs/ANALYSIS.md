@@ -1,6 +1,6 @@
-# ANALYSIS — TraderY — Verified 2026-09-13
+# ANALYSIS — TraderY — Verified 2026-09-13, updated post-P0 same day
 
-> For LLM agents: every claim below was checked against current source. File:line refs are load-bearing — open them before editing. Status = CONFIRMED unless marked NUANCE.
+> For LLM agents: every claim below was checked against current source. File:line refs are load-bearing — open them before editing. Each A-item carries FIXED (with fix ref) or OPEN status. P0 DONE: 14 tests green.
 
 ## Verdict (1 paragraph)
 
@@ -16,39 +16,38 @@ Well-shaped MVP skeleton, not a trading system yet. Architecture (trait split, r
 
 ## Where code diverges from story (fix before selling)
 
-### A1. "Live" is a flag, not a mode — SEVERITY: HIGH — CONFIRMED
-- Evidence: `orchestrator/src/main.rs:73-76` live only skips `llm` agents. `orchestrator/src/main.rs:96` always builds `Box::new(PaperBroker::new(stake))`. No `broker-live`, no branch.
-- Misleading counterpart: `README.md:118-119` warns flipping to live = financial risk. Today live = paper, so false danger now, zero safety later.
-- Fix: either gate `Mode::Live` to refuse-to-run without a real broker, or rename to `paper-only`. See `docs/PLAN.md:P0`.
+### A1. "Live" was a flag, not a mode — FIXED (P0-3)
+- Was: `orchestrator/src/main.rs` always built `PaperBroker`; live only skipped `llm` agents.
+- Now: `orchestrator/src/main.rs:58-62` refuses to run in live mode (`exit 1`, "no live broker compiled in"). `README.md` caveat rewritten to match. No `broker-live` crate yet — P2-4.
+- Remaining: real live adapter + real `reconcile()` (P2-4). Do not re-enable live without it.
 
-### A2. Event log is audit trail, not event sourcing — SEVERITY: HIGH — CONFIRMED
-- Evidence: `persistence/src/lib.rs:46` `append()` used at `orchestrator/src/main.rs:168,179,263`; `persistence/src/lib.rs:57` `read_all()` never called by orchestrator (grep: zero callers). `agent-runtime/src/lib.rs:100-104` `reconcile()` logs error only, paper no-op.
-- Effect: crash restarts with fresh `PaperBroker::new(stake)`, fresh baseline, phantom vs real positions diverge.
-- Fix: replay or reconcile on startup. See `docs/PLAN.md:P1`.
+### A2. Event log was audit-only — FIXED (P1-1, snapshot-based)
+- Was: `read_all()` had zero runtime callers; crash restarted everything fresh.
+- Now: periodic `snapshot` records + full-state `final_summary`; `persistence::load_snapshots()` folds latest state per agent (dead stay dead); `orchestrator --resume` rebuilds broker/baseline/withdrawn. E2E-verified.
+- Known limits: crash window up to `snapshot_every_n_ticks` (50); strategy memory rebuilds; live `reconcile()` still no-op until P2-4.
 
-### A3. Split-at-double does not move money, and loops — SEVERITY: HIGH — CONFIRMED + EXTENDED
-- Evidence: `agent-runtime/src/lib.rs:194-200` updates `baseline/total_withdrawn`, emits `Split{withdrawn, new_baseline}`, never touches `broker.balance`.
-- Extension beyond original analysis: `new_baseline = equity/2`, so condition `equity >= baseline*2` stays true. Once doubled, agent emits `Split` EVERY tick until equity dips. Not just reporting — infinite-report loop.
-- Fix: debit broker equity (needs `Broker::withdraw()` seam) or spawn child agent; set `baseline = equity_after_withdraw`. See `docs/PLAN.md:P0`.
+### A3. Split-at-double moved no money, and looped — FIXED (P0-2)
+- Was: `on_tick` updated `baseline/total_withdrawn` only; `equity >= baseline*2` re-fired every tick.
+- Now: `agent-runtime/src/lib.rs:194-215` calls `broker.withdraw(equity/2)`, baseline = post-withdraw equity, condition is strict `>`. Proven by `split_fires_once_and_resets_baseline` test.
+- Known limitation (documented, tested): withdrawals are cash-only, so a split defers (`OrderRejected`) while profit is unrealized — see `split_defers_while_profit_is_unrealized`. Close winners first, then split.
 
-### A4. Paper P&L is not FX — SEVERITY: HIGH — CONFIRMED
-- Evidence buy/sell asymmetry: `broker-paper/src/lib.rs:46-48` rejects `Buy` if `units*price > balance`, no check for `Sell`. $40 agent can short 1000 units freely, stack infinitely.
-- Evidence flip bug: `broker-paper/src/lib.rs:63-77` realizes P&L on `closing_units` but leaves `avg_entry_price` unchanged when flipping sides (e.g. long 1000 -> sell 2000 leaves short -1000 priced at old long entry). Zero-reset at `:75-77` only fires when flat.
-- Evidence sizing: `config.toml:11,21,33` `units=1000`, EURUSD ~1.10 -> $1100 notional vs $10-100 stake. Most longs -> `InsufficientBalance`.
-- Nuance: spread IS modeled (`broker-paper/src/lib.rs:25-32,40-43`, 1.2 pips). Missing is margin/leverage/commission, not spread.
-- Fix: margin + inventory-aware sizing. See `docs/PLAN.md:P0`.
+### A4. Paper P&L was not FX — FIXED (P0-1)
+- Was: buys rejected on `units*price > balance`, sells unchecked (infinite shorts); flips kept stale `avg_entry_price`.
+- Now: `broker-paper/src/lib.rs:44-115` exposure-based margin both sides at 1x (`with_max_leverage()` to raise; closes always pass so SL/TP can exit); flips reset entry to the flip fill, partial closes keep old avg, flat resets to 0. Proven by 8 broker-paper tests.
+- Still true: sample `config.toml` `units=1000` ≈ $1100 notional vs $10–100 stakes — longs correctly reject at 1x. Size down per broker minimums (README + PLAN P1-2 sizing work remain).
+- Nuance (unchanged): spread IS modeled (1.2 pips). Still missing: commission, per-symbol config.
 
-### A5. Strategies do not know inventory — SEVERITY: MEDIUM — CONFIRMED
+### A5. Strategies do not know inventory — OPEN (P1-2 next)
 - Evidence: `strategy-sma/src/lib.rs:41-52` uses only `ctx.history`, ignores `ctx.account`. Fixed `units`. Can add to winner, reverse without flattening, fight open SL/TP position.
 - LLM does see `balance/equity/open_units` in prompt (`strategy-llm/src/lib.rs:135-149`) but still emits fixed `units`, no flatten signal.
-- Fix: pass inventory to sizing, add flatten/skip-if-open. See `docs/PLAN.md:P1`.
+- Agreed direction (not investment advice): one strategy per agent per symbol from a registry (RSI / Donchian / ATR sizer + news-gate; LLM as regime router, algos as executors). No spot-FX "whale tracking" — no consolidated tape; COT/sentiment proxies at most. See `docs/PLAN.md:P1-2`.
 
-### A6. Other gaps — ALL CONFIRMED
-- `T1` No tests: zero `#[test]`, zero `tests/` dirs.
-- `T2` Tick lag dropped silently: `orchestrator/src/main.rs:144` `Lagged(_) => continue`, no counter/log. Hits slow LLM agents first (8s timeout at `strategy-llm/src/lib.rs:53`).
-- `T3` One mock walk shared: `orchestrator/src/main.rs:188` single `MockFeed`, `orchestrator/src/main.rs:196,201` uses `config.agents[0].symbol` only, broadcasts same candle to all.
-- `T4` Money is `f64` everywhere (`core/src/lib.rs:15-21,70-77`, broker balances). No fixed-point.
-- `T5` Licensing is env-var presence: `licensing/src/lib.rs:15-25` `TRADING_LICENSE_KEY` exists -> `Valid{owner:"unverified"}`.
+### A6. Other gaps — status per item
+- `T1` Tests — FIXED for P0 scope: 8 broker-paper + 6 agent-runtime, `cargo test` green. Still no orchestrator/persistence/strategy tests (P1+).
+- `T2` Tick lag dropped silently — OPEN: `orchestrator/src/main.rs:144` `Lagged(_) => continue`, no counter/log. See P1-3.
+- `T3` One mock walk shared — OPEN: single `MockFeed`, `config.agents[0].symbol` only. See P1-3.
+- `T4` Money is `f64` everywhere — OPEN by decision until P2-1.
+- `T5` Licensing is env-var presence — OPEN until P2-3.
 
 ## What the original analysis missed
 - `M1` Split infinite-loop (A3 extension above) — more urgent than "reporting vs capital".
@@ -56,4 +55,4 @@ Well-shaped MVP skeleton, not a trading system yet. Architecture (trait split, r
 - `M3` README live-warning inversion (A1) — docs actively mislead about risk direction.
 
 ## Bottom line for next LLM
-Do `docs/PLAN.md:P0` first (honest paper broker + honest split + honest live-gate). Do not add `broker-oanda`, multi-symbol feeds, or analytics before P0 tests pass.
+P0 + P1-1 DONE (19 tests). Work P1 in order: P1-2 inventory-aware strategy registry, P1-3 per-symbol feeds + lag counting. No `broker-oanda` until P1 lands.

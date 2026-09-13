@@ -119,6 +119,14 @@ pub trait Broker: Send + Sync {
     async fn reconcile(&mut self) -> Result<(), BrokerError> {
         Ok(())
     }
+    /// Remove cash from the account (profit split / withdrawal).
+    /// PaperBroker subtracts from `balance`; a live adapter withdraws
+    /// or ring-fences funds via the broker API. Default errors so a
+    /// live adapter that forgets to override fails loudly instead of
+    /// reporting phantom withdrawals.
+    fn withdraw(&mut self, _amount: f64) -> Result<(), BrokerError> {
+        Err(BrokerError::Other("withdraw not supported".to_string()))
+    }
 }
 
 // ---------- Strategy ----------

@@ -83,8 +83,32 @@ impl Agent {
         self.status
     }
 
+    pub fn baseline(&self) -> f64 {
+        self.baseline
+    }
+
     pub fn account_state(&self) -> AccountState {
         self.broker.account_state()
+    }
+
+    /// Rebuild an agent from a persisted snapshot (see P1-1): a broker
+    /// already restored to its snapshotted position plus the snapshotted
+    /// split-baseline and lifetime withdrawals. Price history and
+    /// strategy internals (e.g. SMA crossover memory) are NOT restored —
+    /// they rebuild over the next ticks, so expect up to `slow`-window
+    /// ticks before crossover strategies fire again.
+    pub fn restore(
+        id: impl Into<String>,
+        symbol: impl Into<String>,
+        strategy: Box<dyn Strategy>,
+        broker: Box<dyn Broker>,
+        baseline: f64,
+        total_withdrawn: f64,
+    ) -> Self {
+        let mut a = Self::new(id, symbol, strategy, broker, baseline);
+        a.baseline = baseline;
+        a.total_withdrawn = total_withdrawn;
+        a
     }
 
     pub fn push_news(&mut self, item: NewsItem) {
@@ -191,14 +215,235 @@ impl Agent {
             events.push(AgentEvent::Died { final_balance: account.equity });
             return events;
         }
-        if account.equity >= self.baseline * 2.0 {
+        if account.equity > self.baseline * 2.0 {
             let withdrawn = account.equity / 2.0;
-            let new_baseline = account.equity - withdrawn;
-            self.total_withdrawn += withdrawn;
-            self.baseline = new_baseline;
-            events.push(AgentEvent::Split { withdrawn, new_baseline });
+            match self.broker.withdraw(withdrawn) {
+                Ok(()) => {
+                    // Baseline = post-withdraw equity, so the milestone
+                    // cannot re-fire on the next tick at a flat price.
+                    let post = self.broker.account_state();
+                    self.total_withdrawn += withdrawn;
+                    self.baseline = post.equity;
+                    events.push(AgentEvent::Split { withdrawn, new_baseline: post.equity });
+                }
+                Err(e) => {
+                    events.push(AgentEvent::OrderRejected(format!("split withdraw failed: {e}")));
+                }
+            }
         }
 
         events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use broker_paper::PaperBroker;
+    use chrono::Utc;
+
+    fn candle(price: f64) -> Candle {
+        Candle { time: Utc::now(), open: price, high: price, low: price, close: price }
+    }
+
+    struct Hold;
+    #[async_trait]
+    impl Strategy for Hold {
+        fn name(&self) -> &str {
+            "hold"
+        }
+        async fn decide(&mut self, _ctx: &MarketContext<'_>) -> Option<Order> {
+            None
+        }
+    }
+
+    struct AlwaysBuy {
+        units: f64,
+    }
+    #[async_trait]
+    impl Strategy for AlwaysBuy {
+        fn name(&self) -> &str {
+            "always-buy"
+        }
+        async fn decide(&mut self, ctx: &MarketContext<'_>) -> Option<Order> {
+            Some(Order { symbol: ctx.symbol.to_string(), side: Side::Buy, units: self.units })
+        }
+    }
+
+    struct BuyOnce {
+        units: f64,
+        fired: bool,
+    }
+    #[async_trait]
+    impl Strategy for BuyOnce {
+        fn name(&self) -> &str {
+            "buy-once"
+        }
+        async fn decide(&mut self, ctx: &MarketContext<'_>) -> Option<Order> {
+            if self.fired {
+                return None;
+            }
+            self.fired = true;
+            Some(Order { symbol: ctx.symbol.to_string(), side: Side::Buy, units: self.units })
+        }
+    }
+
+    /// Buys once, closes the full position on the next decision, then holds.
+    /// Used to realize profit so split-withdraw (cash-only) can fire.
+    struct BuyThenClose {
+        units: f64,
+        step: u8,
+    }
+    #[async_trait]
+    impl Strategy for BuyThenClose {
+        fn name(&self) -> &str {
+            "buy-then-close"
+        }
+        async fn decide(&mut self, ctx: &MarketContext<'_>) -> Option<Order> {
+            self.step += 1;
+            match self.step {
+                1 => Some(Order { symbol: ctx.symbol.to_string(), side: Side::Buy, units: self.units }),
+                2 => Some(Order {
+                    symbol: ctx.symbol.to_string(),
+                    side: Side::Sell,
+                    units: ctx.account.open_units.abs(),
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    fn has_split(events: &[AgentEvent]) -> bool {
+        events.iter().any(|e| matches!(e, AgentEvent::Split { .. }))
+    }
+
+    #[tokio::test]
+    async fn stop_loss_fires_before_strategy() {
+        let broker: Box<dyn Broker> = Box::new(PaperBroker::new(10_000.0));
+        let mut agent = Agent::new("t", "EUR_USD", Box::new(AlwaysBuy { units: 10.0 }), broker, 10_000.0)
+            .with_stop_loss(0.005);
+        agent.on_tick(candle(1.0)).await; // opens long ~1.00006
+        assert!(agent.account_state().open_units > 0.0);
+        let events = agent.on_tick(candle(0.994)).await; // ~-0.6% -> SL
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::StopLossHit { .. })),
+            "expected StopLossHit, got {events:?}"
+        );
+        assert!(
+            events.iter().all(|e| !matches!(e, AgentEvent::OrderPlaced(_))),
+            "strategy must be skipped after risk exit: {events:?}"
+        );
+        assert_eq!(agent.account_state().open_units, 0.0);
+    }
+
+    #[tokio::test]
+    async fn take_profit_fires_before_strategy() {
+        let broker: Box<dyn Broker> = Box::new(PaperBroker::new(10_000.0));
+        let mut agent = Agent::new("t", "EUR_USD", Box::new(AlwaysBuy { units: 10.0 }), broker, 10_000.0)
+            .with_take_profit(0.01);
+        agent.on_tick(candle(1.0)).await;
+        let events = agent.on_tick(candle(1.02)).await; // ~+2% -> TP
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::TakeProfitHit { .. })),
+            "expected TakeProfitHit, got {events:?}"
+        );
+        assert!(events.iter().all(|e| !matches!(e, AgentEvent::OrderPlaced(_))));
+        assert_eq!(agent.account_state().open_units, 0.0);
+    }
+
+    #[tokio::test]
+    async fn split_fires_once_and_resets_baseline() {
+        let broker: Box<dyn Broker> = Box::new(PaperBroker::new(100.0));
+        let mut agent = Agent::new(
+            "t",
+            "EUR_USD",
+            Box::new(BuyThenClose { units: 50.0, step: 0 }),
+            broker,
+            100.0,
+        );
+        agent.on_tick(candle(1.0)).await; // buy 50 @ ~1.0
+        // Close the winner: realizes ~+105 cash, equity ~205 flat -> split fires.
+        let events = agent.on_tick(candle(3.1)).await;
+        assert!(has_split(&events), "expected Split, got {events:?}");
+        let equity_after = agent.account_state().equity;
+        assert!(
+            agent.total_withdrawn > 90.0 && equity_after < 115.0,
+            "withdrawn={} equity_after={equity_after} (buggy code leaves equity ~205)",
+            agent.total_withdrawn
+        );
+        // Flat next tick must NOT re-fire.
+        let events2 = agent.on_tick(candle(3.1)).await;
+        assert!(!has_split(&events2), "split re-fired: {events2:?}");
+    }
+
+    #[tokio::test]
+    async fn split_defers_while_profit_is_unrealized() {
+        // Honest limitation: withdraw() is cash-only, so an open winner
+        // whose profit is mostly unrealized cannot split yet. Must defer
+        // (OrderRejected), never invent cash.
+        let broker: Box<dyn Broker> = Box::new(PaperBroker::new(100.0));
+        let mut agent = Agent::new(
+            "t",
+            "EUR_USD",
+            Box::new(BuyOnce { units: 50.0, fired: false }),
+            broker,
+            100.0,
+        );
+        agent.on_tick(candle(1.0)).await;
+        let events = agent.on_tick(candle(3.1)).await; // equity ~205, balance 100
+        assert!(!has_split(&events), "must not split unrealized cash: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::OrderRejected(_))),
+            "expected deferral notice, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn death_at_zero_after_catastrophic_loss() {
+        let broker: Box<dyn Broker> =
+            Box::new(PaperBroker::new(10.0).with_max_leverage(5.0));
+        let mut agent = Agent::new(
+            "t",
+            "EUR_USD",
+            Box::new(BuyOnce { units: 45.0, fired: false }),
+            broker,
+            10.0,
+        );
+        agent.on_tick(candle(1.0)).await;
+        let events = agent.on_tick(candle(0.5)).await;
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Died { .. })),
+            "expected Died, got {events:?}"
+        );
+        assert_eq!(agent.status(), AgentStatus::Dead);
+        // Dead agents ignore further ticks.
+        assert!(agent.on_tick(candle(0.5)).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn death_at_zero_starting_balance() {
+        let broker: Box<dyn Broker> = Box::new(PaperBroker::new(0.0));
+        let mut agent = Agent::new("t", "EUR_USD", Box::new(Hold), broker, 0.0);
+        let events = agent.on_tick(candle(1.0)).await;
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Died { .. })));
+    }
+
+    #[tokio::test]
+    async fn restore_rebuilds_position_baseline_and_withdrawn() {
+        // Simulate a snapshot taken mid-run: $80 cash, long 5 @1.2,
+        // baseline $100, $20 previously withdrawn.
+        let broker: Box<dyn Broker> =
+            Box::new(PaperBroker::restore(80.0, 5.0, 1.2).unwrap());
+        let mut agent = Agent::restore("t", "EUR_USD", Box::new(Hold), broker, 100.0, 20.0);
+        assert_eq!(agent.baseline(), 100.0);
+        assert_eq!(agent.total_withdrawn, 20.0);
+        // Mark at entry: equity == balance, position intact.
+        let events = agent.on_tick(candle(1.2)).await;
+        let st = agent.account_state();
+        assert_eq!(st.open_units, 5.0);
+        assert_eq!(st.entry_price, Some(1.2));
+        assert!((st.equity - 80.0).abs() < 1e-9);
+        assert!(!has_split(&events), "no spurious split on restore: {events:?}");
     }
 }

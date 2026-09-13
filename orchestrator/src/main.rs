@@ -54,10 +54,11 @@ async fn main() {
     };
 
     println!("=== Autonomous FX Trading System — mode: {:?} ===\n", config.mode);
-    let is_live = matches!(config.mode, Mode::Live);
-    if is_live {
-        println!("LIVE mode: only algorithmic agents are permitted. Any `llm` agent in the config is skipped below.\n");
+    if matches!(config.mode, Mode::Live) {
+        eprintln!("LIVE mode requested, but no live broker is compiled in (PaperBroker only). Refusing to run so paper fills are never mistaken for real execution. Use mode = \"test\" until broker-oanda + reconcile + margin checks land (see docs/PLAN.md:P0).");
+        std::process::exit(1);
     }
+    let is_live = matches!(config.mode, Mode::Live);
 
     // --- Durable event log ---
     let run_id = Utc::now().format("%Y%m%dT%H%M%S").to_string();

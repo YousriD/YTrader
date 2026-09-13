@@ -115,5 +115,6 @@ running alongside them.
 - Small accounts face real structural headwinds (minimum lot sizes,
   spread cost as a % of capital, broker minimums) that no amount of
   clever code removes. Worth stress-testing in paper mode first.
-- Autonomous live trading carries real financial risk once you flip
-  `RunMode::Live` — that switch is yours to flip, deliberately.
+- `mode = "live"` is currently disabled by the orchestrator (it exits instead
+  of trading) because only `PaperBroker` exists — there is no real execution
+  yet. Do not treat live as paper-with-more-risk. See `docs/PLAN.md:P0-3`.

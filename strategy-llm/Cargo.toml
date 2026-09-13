@@ -1,0 +1,11 @@
+[package]
+name = "strategy-llm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trading-core = { path = "../core" }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

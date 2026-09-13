@@ -1,0 +1,8 @@
+[package]
+name = "agent-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trading-core = { path = "../core" }
+async-trait = { workspace = true }

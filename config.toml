@@ -1,0 +1,36 @@
+mode = "test"           # "test" or "live" — see README before ever using "live"
+ticks = 500
+tick_delay_ms = 50
+news_every_n_ticks = 15
+
+[[agents]]
+id = "algo-fast"
+symbol = "EUR_USD"
+stake_min = 10.0
+stake_max = 100.0
+units = 1000.0
+stop_loss_pct = 0.005    # 0.5%
+take_profit_pct = 0.01   # 1.0%
+strategy = { kind = "sma", fast = 5, slow = 20 }
+
+[[agents]]
+id = "algo-slow"
+symbol = "EUR_USD"
+stake_min = 10.0
+stake_max = 100.0
+units = 1000.0
+stop_loss_pct = 0.005
+take_profit_pct = 0.015
+strategy = { kind = "sma", fast = 10, slow = 40 }
+
+# Only spun up when mode = "test" AND ANTHROPIC_API_KEY is set.
+# Ignored entirely in "live" mode, enforced by the orchestrator itself.
+[[agents]]
+id = "llm-cautious"
+symbol = "EUR_USD"
+stake_min = 10.0
+stake_max = 100.0
+units = 1000.0
+stop_loss_pct = 0.005
+take_profit_pct = 0.01
+strategy = { kind = "llm", persona = "Cautious mean-reversion trader, avoids overtrading.", fallback_fast = 5, fallback_slow = 20 }

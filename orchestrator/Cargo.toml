@@ -1,0 +1,21 @@
+[package]
+name = "orchestrator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trading-core = { path = "../core" }
+broker-paper = { path = "../broker-paper" }
+feed-mock = { path = "../feed-mock" }
+news-mock = { path = "../news-mock" }
+strategy-sma = { path = "../strategy-sma" }
+strategy-llm = { path = "../strategy-llm" }
+strategy-hybrid = { path = "../strategy-hybrid" }
+agent-runtime = { path = "../agent-runtime" }
+persistence = { path = "../persistence" }
+trading-config = { path = "../trading-config" }
+licensing = { path = "../licensing" }
+tokio = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

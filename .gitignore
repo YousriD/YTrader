@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+data/
+.env
+.idea/
+.vscode/
+*.pdb

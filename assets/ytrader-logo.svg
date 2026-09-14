@@ -3,22 +3,14 @@
   <desc id="desc">YTrader wordmark with a simple rising market line.</desc>
   <defs>
     <linearGradient id="accent" x1="0" y1="1" x2="1" y2="0">
-      <stop offset="0" stop-color="#2563eb"/>
-      <stop offset="1" stop-color="#14b8a6"/>
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
     </linearGradient>
-    <style>
-      .brand { fill: #172033; }
-      .mark { stroke: #172033; }
-      @media (prefers-color-scheme: dark) {
-        .brand { fill: #f0f6fc; }
-        .mark { stroke: #f0f6fc; }
-      }
-    </style>
   </defs>
   <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <path class="mark" d="M22 22 50 54 78 22M50 54v44" stroke-width="12"/>
+    <path d="M22 22 50 54 78 22M50 54v44" stroke="#f0f6fc" stroke-width="12"/>
     <path d="M18 88 42 72l19 11 28-27" stroke="url(#accent)" stroke-width="6"/>
-    <circle cx="89" cy="56" r="5" fill="#14b8a6" stroke="none"/>
+    <circle cx="89" cy="56" r="5" fill="#2dd4bf" stroke="none"/>
   </g>
-  <text class="brand" x="126" y="78" font-family="Arial, Helvetica, sans-serif" font-size="52" font-weight="700" letter-spacing="-2">Y<tspan fill="#2563eb">Trader</tspan></text>
+  <text x="126" y="78" fill="#f0f6fc" font-family="Arial, Helvetica, sans-serif" font-size="52" font-weight="700" letter-spacing="-2">Y<tspan fill="#60a5fa">Trader</tspan></text>
 </svg>

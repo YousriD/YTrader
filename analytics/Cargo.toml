@@ -1,0 +1,23 @@
+[package]
+name = "analytics"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "analytics"
+path = "src/lib.rs"
+
+[[bin]]
+name = "analytics"
+path = "src/main.rs"
+
+[dependencies]
+trading-core = { path = "../core" }
+persistence = { path = "../persistence" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+broker-paper = { path = "../broker-paper" }

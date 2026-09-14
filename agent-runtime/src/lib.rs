@@ -10,13 +10,16 @@ pub enum AgentStatus {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Tick { equity: f64 },
-    OrderPlaced(Order),
+    /// A strategy order filled. `price` is the actual fill (P2-2 needs it
+    /// for trade reconstruction — never drop fill data from the log).
+    OrderPlaced { order: Order, price: f64 },
     OrderRejected(String),
     /// A stop-loss / take-profit exit fired. This is a forced close
     /// issued by the risk layer itself, independent of what the
-    /// strategy wanted to do this tick.
-    StopLossHit { price: f64, move_pct: f64 },
-    TakeProfitHit { price: f64, move_pct: f64 },
+    /// strategy wanted to do this tick. `closed_units` is the full
+    /// position just flattened (P2-2 trade accounting).
+    StopLossHit { price: f64, move_pct: f64, closed_units: f64 },
+    TakeProfitHit { price: f64, move_pct: f64, closed_units: f64 },
     /// Equity crossed 2x the current baseline: half is "withdrawn" and
     /// the remaining half becomes the new baseline the agent keeps
     /// trading with, so the milestone can be hit again.
@@ -150,10 +153,11 @@ impl Agent {
         }
 
         let side = if account.open_units > 0.0 { Side::Sell } else { Side::Buy };
-        let order = Order { symbol: self.symbol.clone(), side, units: account.open_units.abs() };
+        let closed_units = account.open_units.abs();
+        let order = Order { symbol: self.symbol.clone(), side, units: closed_units };
         match self.broker.place_order(order).await {
-            Ok(_) if hit_sl => Some(AgentEvent::StopLossHit { price: last, move_pct }),
-            Ok(_) => Some(AgentEvent::TakeProfitHit { price: last, move_pct }),
+            Ok(_) if hit_sl => Some(AgentEvent::StopLossHit { price: last, move_pct, closed_units }),
+            Ok(_) => Some(AgentEvent::TakeProfitHit { price: last, move_pct, closed_units }),
             Err(_) => None, // couldn't close — next tick will try again
         }
     }
@@ -204,7 +208,7 @@ impl Agent {
         };
         if let Some(order) = self.strategy.decide(&ctx).await {
             match self.broker.place_order(order.clone()).await {
-                Ok(_fill) => events.push(AgentEvent::OrderPlaced(order)),
+                Ok(fill) => events.push(AgentEvent::OrderPlaced { order, price: fill.price }),
                 Err(e) => events.push(AgentEvent::OrderRejected(e.to_string())),
             }
         }
@@ -331,7 +335,7 @@ mod tests {
             "expected StopLossHit, got {events:?}"
         );
         assert!(
-            events.iter().all(|e| !matches!(e, AgentEvent::OrderPlaced(_))),
+            events.iter().all(|e| !matches!(e, AgentEvent::OrderPlaced { .. })),
             "strategy must be skipped after risk exit: {events:?}"
         );
         assert_eq!(agent.account_state().open_units, 0.0);
@@ -348,7 +352,7 @@ mod tests {
             events.iter().any(|e| matches!(e, AgentEvent::TakeProfitHit { .. })),
             "expected TakeProfitHit, got {events:?}"
         );
-        assert!(events.iter().all(|e| !matches!(e, AgentEvent::OrderPlaced(_))));
+        assert!(events.iter().all(|e| !matches!(e, AgentEvent::OrderPlaced { .. })));
         assert_eq!(agent.account_state().open_units, 0.0);
     }
 

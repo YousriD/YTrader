@@ -1,8 +1,20 @@
-mode = "test"           # "test" or "live" — live refuses to run until a real broker exists
+mode = "test"           # "test" or "live" — live = OANDA practice ONLY (anything else refuses)
 ticks = 500
 tick_delay_ms = 50
 news_every_n_ticks = 15
 snapshot_every_n_ticks = 50  # per-agent state checkpoint; crash window = up to N ticks (0 disables)
+
+# --- P2-4 OANDA demo template (live mode only; test mode ignores this) ---
+# 1. Open a practice account, generate a token, NEVER commit it:
+#      $env:OANDA_API_KEY = "your-practice-token"   # PowerShell
+# 2. Uncomment, set your practice account_id, run with mode = "live".
+# 3. Gate the log before trusting anything:
+#      cargo run -p analytics -- gate data/run-<ts>.jsonl
+# The real-money host (api-fxtrade.oanda.com) is refused mechanically —
+# it cannot run, no matter what this file says.
+# [oanda]
+# base_url = "https://api-fxpractice.oanda.com"
+# account_id = "101-001-23456789-001"
 
 [[agents]]
 id = "algo-fast"
@@ -24,8 +36,7 @@ stop_loss_pct = 0.005
 take_profit_pct = 0.015
 strategy = { kind = "sma", fast = 10, slow = 40 }
 
-# Only spun up when mode = "test" AND ANTHROPIC_API_KEY is set.
-# Ignored entirely in "live" mode, enforced by the orchestrator itself.
+# Only spun up when ANTHROPIC_API_KEY is set (skipped otherwise).
 [[agents]]
 id = "llm-cautious"
 symbol = "EUR_USD"
@@ -35,3 +46,42 @@ units = 1000.0
 stop_loss_pct = 0.005
 take_profit_pct = 0.01
 strategy = { kind = "llm", persona = "Cautious mean-reversion trader, avoids overtrading.", fallback_fast = 5, fallback_slow = 20 }
+
+# --- P2-1 venue-economics example (uncomment to simulate a venue rulebook) ---
+# min_units rejects dust orders, min_notional sets a floor, commission
+# is deducted per filled unit on every fill, spread_pips overrides 1.2:
+# [[agents]]
+# id = "venue-realistic"
+# symbol = "EUR_USD"
+# stake_min = 100.0
+# stake_max = 100.0
+# units = 50.0
+# min_units = 10.0
+# min_notional = 20.0
+# commission_per_unit = 0.001
+# spread_pips = 2.0
+# strategy = { kind = "sma", fast = 5, slow = 20 }
+
+# --- P1-2 registry examples (uncomment to run; units sized for paper) ---
+# RSI mean-reversion, no pyramiding (default), capped size:
+# [[agents]]
+# id = "rsi-mr"
+# symbol = "EUR_USD"
+# stake_min = 50.0
+# stake_max = 50.0
+# units = 100.0
+# max_position_units = 100.0
+# stop_loss_pct = 0.005
+# take_profit_pct = 0.01
+# strategy = { kind = "rsi", period = 14, overbought = 70.0, oversold = 30.0 }
+#
+# Donchian breakout wrapped in ATR sizing + news gate (nesting composes):
+# [[agents]]
+# id = "donch-atr"
+# symbol = "EUR_USD"
+# stake_min = 50.0
+# stake_max = 50.0
+# units = 100.0
+# stop_loss_pct = 0.005
+# take_profit_pct = 0.015
+# strategy = { kind = "atr", inner = { kind = "news_gated", inner = { kind = "donchian", channel = 20 }, cooldown_ticks = 5, sentiment_threshold = 0.5 }, period = 14, risk_pct = 0.02, max_units = 300.0 }

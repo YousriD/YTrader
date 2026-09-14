@@ -1,6 +1,6 @@
-# ANALYSIS — TraderY — Verified 2026-09-13, updated post-P0 same day
+# ANALYSIS — TraderY — Verified 2026-09-13, updated post-P2-4 same day
 
-> For LLM agents: every claim below was checked against current source. File:line refs are load-bearing — open them before editing. Each A-item carries FIXED (with fix ref) or OPEN status. P0 DONE: 14 tests green.
+> For LLM agents: every claim below was checked against current source. Each A-item carries FIXED (with fix ref) or OPEN status. P0 + P1 + P2-1-venue + P2-2 + P2-4 DONE: 69 tests green.
 
 ## Verdict (1 paragraph)
 
@@ -37,16 +37,17 @@ Well-shaped MVP skeleton, not a trading system yet. Architecture (trait split, r
 - Still true: sample `config.toml` `units=1000` ≈ $1100 notional vs $10–100 stakes — longs correctly reject at 1x. Size down per broker minimums (README + PLAN P1-2 sizing work remain).
 - Nuance (unchanged): spread IS modeled (1.2 pips). Still missing: commission, per-symbol config.
 
-### A5. Strategies do not know inventory — OPEN (P1-2 next)
-- Evidence: `strategy-sma/src/lib.rs:41-52` uses only `ctx.history`, ignores `ctx.account`. Fixed `units`. Can add to winner, reverse without flattening, fight open SL/TP position.
-- LLM does see `balance/equity/open_units` in prompt (`strategy-llm/src/lib.rs:135-149`) but still emits fixed `units`, no flatten signal.
-- Agreed direction (not investment advice): one strategy per agent per symbol from a registry (RSI / Donchian / ATR sizer + news-gate; LLM as regime router, algos as executors). No spot-FX "whale tracking" — no consolidated tape; COT/sentiment proxies at most. See `docs/PLAN.md:P1-2`.
+### A5. Strategies were inventory-blind — FIXED (P1-2)
+- Was: SMA used only `ctx.history`, fixed size, pyramided into SL/TP positions.
+- Now: `strategy-indicators` registry (`Rsi`, `DonchianBreakout`, `AtrSizer`, `NewsGate`) + retrofitted SMA all share `inventory::{pyramid_blocked, clamp_units}` — no adds to open positions unless `allow_pyramid`, sizes capped at `max_position_units`. Per-agent knobs in `config.toml`, recursive `atr`/`news_gated` nesting, `contains_llm()` gating at any depth.
+- Known limits: skip-only (no auto-flatten); ATR sizer margin-unaware (broker rejects, correctly); LLM-as-router not built.
+- Fix ref: `docs/PLAN.md:P1-2`.
 
 ### A6. Other gaps — status per item
-- `T1` Tests — FIXED for P0 scope: 8 broker-paper + 6 agent-runtime, `cargo test` green. Still no orchestrator/persistence/strategy tests (P1+).
-- `T2` Tick lag dropped silently — OPEN: `orchestrator/src/main.rs:144` `Lagged(_) => continue`, no counter/log. See P1-3.
-- `T3` One mock walk shared — OPEN: single `MockFeed`, `config.agents[0].symbol` only. See P1-3.
-- `T4` Money is `f64` everywhere — OPEN by decision until P2-1.
+- `T1` Tests — DONE for P0+P1 scope: 9 broker-paper + 7 agent-runtime + 3 persistence + 14 strategy-indicators + 3 trading-config + 3 orchestrator + 1 resume-e2e = 40 green. Still no strategy-llm/hybrid/feed/news tests.
+- `T2` Tick lag dropped silently — FIXED (P1-3): counted per agent, printed + persisted as `tick_lag`, totals in final report.
+- `T3` One mock walk shared — FIXED (P1-3): one feed per distinct symbol; news still global (mock has no attribution).
+- `T4` Money is `f64` — OPEN by decision (P2-1 deferred decimal: rewrite risk dwarfs rounding risk; tolerance discipline in tests). Venue-economics half of P2-1 is DONE (minimums/commission/spread simulated per agent).
 - `T5` Licensing is env-var presence — OPEN until P2-3.
 
 ## What the original analysis missed
@@ -55,4 +56,4 @@ Well-shaped MVP skeleton, not a trading system yet. Architecture (trait split, r
 - `M3` README live-warning inversion (A1) — docs actively mislead about risk direction.
 
 ## Bottom line for next LLM
-P0 + P1-1 DONE (19 tests). Work P1 in order: P1-2 inventory-aware strategy registry, P1-3 per-symbol feeds + lag counting. No `broker-oanda` until P1 lands.
+P0 + P1 + P2-1-venue + P2-2 + P2-4 DONE (69 tests). Next: P2-5 feeds (P2-3 licensing when selling nears). Live mode exists but ONLY against the OANDA practice host with fail-closed reconcile — the trade host is refused mechanically, and `gate` still blocks promotable claims.

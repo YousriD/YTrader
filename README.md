@@ -46,10 +46,12 @@ cargo run -p orchestrator -- config.toml --resume
 | Crate | Role |
 |---|---|
 | `core` | Trait definitions: `Broker` (+`withdraw`, `reconcile`), `MarketFeed`, `NewsFeed`, `Strategy`. The whole extension contract. |
-| `broker-paper` | Simulated fills with spread + 1x exposure margin (both sides, closes always pass), correct flip-entry averaging, cash-only `withdraw()`. 8 unit tests. |
+| `broker-paper` | Simulated fills with spread + 1x exposure margin (both sides, closes always pass), correct flip-entry averaging, cash-only `withdraw()`, and venue economics (`min_units` / `min_notional` / per-fill commission / spread override). 12 unit tests. |
+| `broker-oanda` | REAL adapter, practice-host only: market orders, mirror + genuine `reconcile()`, hedged positions refused, key redacted in logs. 8 tests + 1 ignored live check. |
 | `feed-mock` | Random-walk price generator, no network needed. |
 | `news-mock` | Emits sample headlines with sentiment scores periodically. |
-| `strategy-sma` | Algorithmic baseline: fast/slow SMA crossover. |
+| `strategy-sma` | Algorithmic baseline: fast/slow SMA crossover, inventory-guarded (no pyramiding by default). |
+| `strategy-indicators` | Registry: RSI mean-reversion, Donchian breakout, ATR volatility sizer, news gate — all sharing the same no-pyramid/size-clamp guards, composable per agent in `config.toml`. |
 | `strategy-llm` | Calls an LLM every N ticks, with its own failure backoff/cooldown. |
 | `strategy-hybrid` | Wraps an LLM strategy with an algorithmic fallback — the "AI unreachable" guarantee lives here. |
 | `agent-runtime` | Agent lifecycle: stop-loss/take-profit risk layer (runs before strategy), die-at-zero, split-at-double via real `broker.withdraw()` (single-fire; defers while profit is unrealized), reconcile-on-startup hook. 6 unit tests. |
@@ -57,6 +59,7 @@ cargo run -p orchestrator -- config.toml --resume
 | `trading-config` | Parses `config.toml` into typed agent specs. |
 | `licensing` | Currently a no-op seam — the hook where real license enforcement goes before you sell this. |
 | `orchestrator` | Binary: loads config, builds the agent pool, runs everything as parallel tokio tasks, logs + persists. |
+| `analytics` | Offline stats over run logs: per-agent + portfolio metrics, demo→live promotion gate, log-tailing tracker. Never touches live trading. |
 
 ## The rules you specified, and where they live
 
@@ -71,7 +74,7 @@ cargo run -p orchestrator -- config.toml --resume
 
 ## Architecture decisions made now, deliberately, because they're expensive later
 
-- **Event log as audit trail (replay is P1).** Every state change is an append-only record (`persistence::EventLog`), and `read_all()` exists — but the orchestrator does not replay it on startup yet, so a crash still restarts from fresh stakes. Retrofitting replay later is the planned P1-1 task; doing the append-only shape now costs almost nothing.
+- **Event log + snapshot resume.** Every state change is an append-only record (`persistence::EventLog`), agents checkpoint restorable snapshots every `snapshot_every_n_ticks`, and `orchestrator -- config.toml --resume` rebuilds broker/baseline/withdrawn state from the newest log (verified end-to-end). Honest limits: only snapshots/finals fold — ticks and orders are not replayed — so the crash window is up to N ticks, and strategy internals rebuild over ticks.
 - **Config-driven agents.** Even as a single-user tool, a config file (vs. hardcoded `main.rs`) is what makes this distributable later without you personally recompiling it for a buyer.
 - **`Broker::reconcile()` as a required seam.** A paper broker has nothing to reconcile, but the hook exists so a live adapter is *forced* to ask the real broker "what's actually open?" on every startup — this is the difference between a crash-and-restart being a non-event and it being a double-position disaster.
 - **Licensing seam, not licensing.** `licensing::check()` does nothing meaningful today (env var presence only) — but `main()` already calls through it, so adding real enforcement later is a one-file change, not a restructuring.
@@ -92,39 +95,45 @@ running alongside them.
 
 ## Next steps toward a sellable single-user tool
 
-1. **Crash recovery / replay** (`docs/PLAN.md:P1-1`): `read_all()` the last
-   run log on startup to restore baseline/withdrawn/positions; live
-   adapters must implement real `reconcile()`.
-2. **Inventory-aware strategies** (`docs/PLAN.md:P1-2`): one strategy per
-   agent per symbol (registry direction: RSI / Donchian / ATR sizer +
-   news-gate; LLM as regime router, algos as executors). No "whale
-   tracking" for spot FX — no consolidated tape; use COT/sentiment
-   proxies instead.
-3. **Multi-symbol + lag accounting** (`docs/PLAN.md:P1-3`): one feed
-   subscription per distinct symbol instead of `config.agents[0].symbol`,
-   and count `Lagged(n)` instead of silently skipping.
-4. **Real broker adapters, demo-first** (one crate per venue, e.g.
-   `broker-oanda`, all implementing `Broker` + real `reconcile()`):
-   each adapter serves its venue's demo/practice AND live endpoints from
-   one crate via config. Ladder: internal paper → venue demo ($100
-   testbed for every algorithm) → venue live, promoted only on green
-   stats. Only after P1.
+1. **Crash recovery hardening** (P1-1 snapshot resume is done): shrink the
+   crash window (currently up to `snapshot_every_n_ticks`), consider
+   full tick/order replay later; live adapters must still implement
+   real `reconcile()` (`docs/PLAN.md:P2-4`).
+2. **Inventory-aware strategy registry — DONE (P1-2).** One strategy per
+   agent per symbol (RSI / Donchian / ATR sizer + news-gate, LLM as
+   future regime router, algos as executors). No "whale tracking" for
+   spot FX — no consolidated tape; COT/sentiment proxies at most.
+   Open follow-ups: auto-flatten (guard is skip-only), margin-aware ATR
+   sizing, LLM router.
+3. **Multi-symbol + lag accounting — DONE (P1-3).** One feed subscription
+   per distinct symbol, lag counted per agent (printed + persisted,
+   totals in the final report). News fan-out is still global (mock has
+   no symbol attribution).
+4. **Real broker adapters — OANDA practice DONE (P2-4).** `broker-oanda`
+   implements `Broker` with market orders + genuine `reconcile()`; live
+   mode runs against the practice host ONLY (trade host refused
+   mechanically, distinct symbols enforced, opening reconcile is
+   fail-closed). Ladder: internal paper → venue demo ($100 testbed,
+   gate the log) → venue live, promoted only on green stats. Demo
+   template + procedure in `config.toml` / `docs/PLAN.md:P2-4`.
 5. **Real world-info feeds** (`docs/PLAN.md:P2-5`): economic calendar
    first (rates/CPI/NFP move FX most), then headline APIs with optional
    LLM sentiment scoring (same pattern `strategy-llm` already uses).
    Feeds degrade to neutral on failure and never block trading.
-6. **Performance statistics + trackers** (`docs/PLAN.md:P2-2`): Sharpe,
-   max drawdown, win rate, profit factor per agent/symbol/strategy from
-   the event log — this is what actually makes the product's track
-   record legible to a future buyer, not just raw equity numbers, and
-   what gates every demo→live promotion.
+6. **Performance statistics + trackers — DONE (P2-2).** `cargo run -p
+   analytics -- report|gate|track <run.jsonl>`: Sharpe, drawdown, win
+   rate, profit factor per agent + portfolio, and a gate that exits 1
+   with named reasons when a system isn't promotable. This is what
+   gates every demo→live promotion.
 7. **Real license enforcement**: replace `licensing::check()`'s env-var
    presence check with actual signature verification before
    distributing to anyone else.
-8. **Position sizing / real risk limits**: paper now enforces 1x exposure
-   margin + correct flip averaging, but the sample `units = 1000` still
-   dwarfs a $10–100 stake at ~1.10 — validate minimum-lot sizing per
-   broker before writing more strategies.
+8. **Position sizing / real risk limits — venue half DONE (P2-1).**
+   Paper enforces 1x exposure margin + correct flip averaging + venue
+   economics (`min_units` / `min_notional` / per-fill commission /
+   spread override, per agent). The sample `units = 1000` still dwarfs
+   a $10–100 stake at ~1.10 — size down per venue. `rust_decimal`
+   migration explicitly deferred (see `docs/PLAN.md:P2-1`).
 
 ## Honest caveats (educational software — not investment advice)
 
@@ -134,12 +143,17 @@ running alongside them.
   strategies are profitable. No indicator predicts FX; trend /
   mean-reversion / breakout systems only systematize entries for the
   risk layer to manage.
-- Paper semantics since P0: 1x exposure margin both sides (closes always
-  allowed), spread 1.2 pips, flip-entry reset on side change, cash-only
-  withdrawals (splits defer while profit is unrealized).
+- Paper semantics: 1x exposure margin both sides (closes always
+  allowed), spread 1.2 pips default, flip-entry reset on side change,
+  cash-only withdrawals (splits defer while profit is unrealized),
+  venue economics per agent (`min_units` / `min_notional` / commission /
+  spread override). Money is `f64` by decision — tests use tolerance,
+  never `==` (decimal migration deferred, see `docs/PLAN.md:P2-1`).
 - Small accounts face real structural headwinds (minimum lot sizes,
   spread cost as a % of capital, broker minimums) that no amount of
   clever code removes. Worth stress-testing in paper mode first.
-- `mode = "live"` is currently disabled by the orchestrator (it exits instead
-  of trading) because only `PaperBroker` exists — there is no real execution
-  yet. Do not treat live as paper-with-more-risk. See `docs/PLAN.md:P0-3`.
+- `mode = "live"` runs ONLY against the OANDA practice host with a
+  reconciled adapter: trade host, missing account/key, shared symbols,
+  or a failed opening reconcile all abort the run (fail closed).
+  Practice money only — and gate every log before trusting anything.
+  See `docs/PLAN.md:P2-4` + the `[oanda]` demo template in `config.toml`.

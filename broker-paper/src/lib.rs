@@ -14,6 +14,10 @@ pub struct PaperBroker {
     spread_pips: f64,
     pip_value: f64, // simplistic: price move per "pip" for the symbol
     max_leverage: f64, // 1.0 = spot-parity: total exposure may not exceed balance
+    // P2-1 venue economics: what the venue's rulebook charges/requires.
+    min_units: f64,          // smallest order accepted (default 1.0)
+    min_notional: f64,       // smallest notional accepted; 0.0 = no floor
+    commission_per_unit: f64, // cash deducted per filled unit, every fill
 }
 
 impl PaperBroker {
@@ -26,11 +30,36 @@ impl PaperBroker {
             spread_pips: 1.2,
             pip_value: 0.0001,
             max_leverage: 1.0,
+            min_units: 1.0,
+            min_notional: 0.0,
+            commission_per_unit: 0.0,
         }
     }
 
     pub fn with_max_leverage(mut self, leverage: f64) -> Self {
         self.max_leverage = leverage.max(1.0);
+        self
+    }
+
+    /// Venue rulebook overrides (P2-1). Each validates its input so a
+    /// misconfigured venue fails fast at startup, not mid-run.
+    pub fn with_min_units(mut self, min_units: f64) -> Self {
+        self.min_units = if min_units.is_finite() { min_units.max(1.0) } else { 1.0 };
+        self
+    }
+
+    pub fn with_min_notional(mut self, min_notional: f64) -> Self {
+        self.min_notional = if min_notional.is_finite() { min_notional.max(0.0) } else { 0.0 };
+        self
+    }
+
+    pub fn with_commission_per_unit(mut self, rate: f64) -> Self {
+        self.commission_per_unit = if rate.is_finite() { rate.max(0.0) } else { 0.0 };
+        self
+    }
+
+    pub fn with_spread_pips(mut self, pips: f64) -> Self {
+        self.spread_pips = if pips.is_finite() { pips.max(0.0) } else { self.spread_pips };
         self
     }
 
@@ -67,6 +96,22 @@ impl Broker for PaperBroker {
 
         if !order.units.is_finite() || order.units <= 0.0 {
             return Err(BrokerError::Other("order units must be positive".to_string()));
+        }
+
+        // P2-1 venue minimums: rejected before margin so a too-small
+        // order reads as a rulebook rejection, not an affordability one.
+        if order.units < self.min_units {
+            return Err(BrokerError::Other(format!(
+                "below venue minimum of {} units",
+                self.min_units
+            )));
+        }
+        let notional = order.units * fill_price;
+        if self.min_notional > 0.0 && notional < self.min_notional {
+            return Err(BrokerError::Other(format!(
+                "below venue minimum notional of ${:.2}",
+                self.min_notional
+            )));
         }
 
         // Margin: only orders that INCREASE absolute exposure need cover.
@@ -110,6 +155,13 @@ impl Broker for PaperBroker {
         self.open_units += signed_units;
         if self.open_units == 0.0 {
             self.avg_entry_price = 0.0;
+        }
+
+        // P2-1 commission on every fill (opens AND closes, including
+        // forced SL/TP exits). Costs can take balance negative — the
+        // agent's die-at-zero check catches that next tick.
+        if self.commission_per_unit > 0.0 {
+            self.balance -= order.units * self.commission_per_unit;
         }
 
         Ok(Fill {
@@ -270,5 +322,39 @@ mod tests {
         // Flat units with nonzero entry (or vice versa) is corrupt.
         assert!(PaperBroker::restore(100.0, 0.0, 1.1).is_err());
         assert!(PaperBroker::restore(100.0, 10.0, 0.0).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_below_venue_minimums() {
+        let mut b = PaperBroker::new(10_000.0).with_min_units(100.0).with_min_notional(500.0);
+        b.mark_price(1.0);
+        assert!(b.place_order(order(Side::Buy, 10.0)).await.is_err()); // units
+        assert!(b.place_order(order(Side::Buy, 100.0)).await.is_err()); // $100 notional
+        b.place_order(order(Side::Buy, 600.0)).await.unwrap(); // $600 clears both
+        assert_eq!(b.account_state().open_units, 600.0);
+    }
+
+    #[tokio::test]
+    async fn commission_deducted_on_every_fill() {
+        let mut b = PaperBroker::new(100.0).with_commission_per_unit(0.10);
+        b.mark_price(1.0);
+        b.place_order(order(Side::Buy, 10.0)).await.unwrap();
+        assert!((b.account_state().balance - 99.0).abs() < 1e-9); // -$1.00
+        b.mark_price(1.0);
+        b.place_order(order(Side::Sell, 10.0)).await.unwrap(); // close also pays
+        // 98.00 minus the round-trip spread cost (2 fills × 10 units × 0.00006).
+        assert!((b.account_state().balance - 97.9988).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn spread_override_moves_fill_price() {
+        let mut tight = PaperBroker::new(10_000.0);
+        let mut wide = PaperBroker::new(10_000.0).with_spread_pips(10.0);
+        tight.mark_price(1.0);
+        wide.mark_price(1.0);
+        let f_tight = tight.place_order(order(Side::Buy, 10.0)).await.unwrap();
+        let f_wide = wide.place_order(order(Side::Buy, 10.0)).await.unwrap();
+        assert!(f_wide.price > f_tight.price);
+        assert!((f_wide.price - f_tight.price - (10.0 - 1.2) * 0.0001 / 2.0).abs() < 1e-9);
     }
 }

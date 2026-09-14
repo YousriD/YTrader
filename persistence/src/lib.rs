@@ -99,6 +99,43 @@ pub fn latest_run_file(dir: impl AsRef<Path>) -> Option<PathBuf> {
         .map(|n| dir.as_ref().join(n))
 }
 
+/// Build the `snapshot` record the orchestrator persists every
+/// `snapshot_every_n_ticks`. logger + tests share this constructor so
+/// the on-disk shape cannot drift from what `load_snapshots` reads.
+pub fn snapshot_record(run_id: &str, agent_id: &str, tick: u32, snap: &Snapshot) -> EventRecord {
+    EventRecord {
+        ts: Utc::now(),
+        run_id: run_id.to_string(),
+        agent_id: agent_id.to_string(),
+        tick,
+        kind: "snapshot".to_string(),
+        data: serde_json::json!({
+            "balance": snap.balance, "open_units": snap.open_units,
+            "entry_price": snap.entry_price, "baseline": snap.baseline,
+            "withdrawn": snap.withdrawn,
+        }),
+    }
+}
+
+/// Build the terminal `final_summary` record: same state keys as a
+/// snapshot plus status/equity. `tick` is max so it sorts after every
+/// tick record from the run.
+pub fn final_record(run_id: &str, agent_id: &str, status: &str, equity: f64, snap: &Snapshot) -> EventRecord {
+    EventRecord {
+        ts: Utc::now(),
+        run_id: run_id.to_string(),
+        agent_id: agent_id.to_string(),
+        tick: u32::MAX,
+        kind: "final_summary".to_string(),
+        data: serde_json::json!({
+            "status": status, "equity": equity,
+            "balance": snap.balance, "open_units": snap.open_units,
+            "entry_price": snap.entry_price, "baseline": snap.baseline,
+            "withdrawn": snap.withdrawn,
+        }),
+    }
+}
+
 fn json_num(data: &serde_json::Value, key: &str) -> Option<f64> {
     data.get(key)?.as_f64()
 }

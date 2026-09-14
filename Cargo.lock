@@ -14,6 +14,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "analytics"
+version = "0.1.0"
+dependencies = [
+ "broker-paper",
+ "chrono",
+ "persistence",
+ "serde",
+ "serde_json",
+ "tokio",
+ "trading-core",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -56,6 +69,19 @@ name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
+
+[[package]]
+name = "broker-oanda"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "trading-core",
+]
 
 [[package]]
 name = "broker-paper"
@@ -602,6 +628,8 @@ name = "orchestrator"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "async-trait",
+ "broker-oanda",
  "broker-paper",
  "chrono",
  "feed-mock",
@@ -611,6 +639,7 @@ dependencies = [
  "rand 0.8.8",
  "serde_json",
  "strategy-hybrid",
+ "strategy-indicators",
  "strategy-llm",
  "strategy-sma",
  "tokio",
@@ -1049,6 +1078,16 @@ name = "strategy-hybrid"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "trading-core",
+]
+
+[[package]]
+name = "strategy-indicators"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "tokio",
  "trading-core",
 ]
 

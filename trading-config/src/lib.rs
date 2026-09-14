@@ -13,6 +13,17 @@ pub enum Mode {
 pub enum StrategySpec {
     /// Pure algorithmic SMA crossover.
     Sma { fast: usize, slow: usize },
+    /// Mean-reversion RSI on Wilder exits (buy leaving oversold, sell
+    /// leaving overbought). Inventory-guarded like every registry entry.
+    Rsi { period: usize, overbought: f64, oversold: f64 },
+    /// Donchian channel breakout over the prior `channel` candles.
+    Donchian { channel: usize },
+    /// Volatility sizer around any inner strategy: keeps its side,
+    /// scales size to `equity * risk_pct / atr` (see strategy-indicators).
+    Atr { inner: Box<StrategySpec>, period: usize, risk_pct: f64, max_units: f64 },
+    /// News gate around any inner strategy: suppresses entries for
+    /// `cooldown_ticks` after news with `|sentiment| >= threshold`.
+    NewsGated { inner: Box<StrategySpec>, cooldown_ticks: u32, sentiment_threshold: f64 },
     /// LLM-driven, always wrapped in a Hybrid with an SMA fallback.
     /// Requires ANTHROPIC_API_KEY at runtime, else the agent is skipped.
     Llm { persona: String, fallback_fast: usize, fallback_slow: usize },
@@ -29,14 +40,34 @@ pub struct AgentSpec {
     pub stop_loss_pct: Option<f64>,
     /// e.g. 0.02 = 2%. Omit to disable.
     pub take_profit_pct: Option<f64>,
+    /// P1-2 inventory guard: when false (default), strategies skip new
+    /// entries while a position is open instead of pyramiding.
+    #[serde(default)]
+    pub allow_pyramid: bool,
+    /// Cap on emitted order size. Defaults to `units` when omitted.
+    #[serde(default)]
+    pub max_position_units: Option<f64>,
+    /// P2-1 venue economics (all optional; omitted = current defaults).
+    /// Smallest order the venue accepts (default 1.0 in the broker).
+    #[serde(default)]
+    pub min_units: Option<f64>,
+    /// Smallest notional the venue accepts. None/0 = no floor.
+    #[serde(default)]
+    pub min_notional: Option<f64>,
+    /// Cash deducted per filled unit, every fill (default 0.0).
+    #[serde(default)]
+    pub commission_per_unit: f64,
+    /// Spread in pips (default 1.2 in the broker).
+    #[serde(default)]
+    pub spread_pips: Option<f64>,
     pub strategy: StrategySpec,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunConfig {
     /// "test" = paper trading only, always safe.
-    /// "live" = refused by the orchestrator until a real broker adapter
-    /// exists (see docs/PLAN.md:P0-3). No silent paper-as-live, ever.
+    /// "live" = real OANDA adapter, practice host ONLY (any other
+    /// base_url keeps refusing — see `broker_oanda::is_practice_url`).
     pub mode: Mode,
     pub ticks: u32,
     pub tick_delay_ms: u64,
@@ -46,7 +77,34 @@ pub struct RunConfig {
     /// up to N ticks of history. Defaults to 50; set 0 to disable.
     #[serde(default = "default_snapshot_every")]
     pub snapshot_every_n_ticks: u32,
+    /// Venue connection (P2-4). Only read in live mode; test mode
+    /// ignores it entirely. API key NEVER lives here — env only.
+    #[serde(default)]
+    pub oanda: OandaConfig,
     pub agents: Vec<AgentSpec>,
+}
+
+/// OANDA connection. `account_id` is not secret; the token comes from
+/// `OANDA_API_KEY` env at runtime so it can never be committed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OandaConfig {
+    /// Default: the practice host. The real-money host is refused
+    /// mechanically by the orchestrator.
+    #[serde(default = "default_oanda_base_url")]
+    pub base_url: String,
+    /// Practice account id, e.g. "101-001-23456789-001".
+    #[serde(default)]
+    pub account_id: String,
+}
+
+impl Default for OandaConfig {
+    fn default() -> Self {
+        Self { base_url: default_oanda_base_url(), account_id: String::new() }
+    }
+}
+
+fn default_oanda_base_url() -> String {
+    "https://api-fxpractice.oanda.com".to_string()
 }
 
 fn default_snapshot_every() -> u32 {
@@ -58,5 +116,79 @@ impl RunConfig {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("failed to read config {:?}: {e}", path.as_ref()))?;
         toml::from_str(&text).map_err(|e| format!("failed to parse config: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent_toml(strategy: &str, extra: &str) -> String {
+        format!(
+            r#"mode = "test"
+ticks = 10
+tick_delay_ms = 1
+news_every_n_ticks = 15
+
+[[agents]]
+id = "a"
+symbol = "EUR_USD"
+stake_min = 10.0
+stake_max = 100.0
+units = 100.0
+{extra}
+strategy = {strategy}
+"#
+        )
+    }
+
+    #[test]
+    fn parses_registry_and_nested_wrappers() {
+        let cfg: RunConfig = toml::from_str(&agent_toml(
+            r#"{ kind = "atr", inner = { kind = "news_gated", inner = { kind = "rsi", period = 14, overbought = 70.0, oversold = 30.0 }, cooldown_ticks = 5, sentiment_threshold = 0.5 }, period = 14, risk_pct = 0.02, max_units = 500.0 }"#,
+            "",
+        )).unwrap();
+        assert_eq!(cfg.agents.len(), 1);
+        // Inventory knobs default when omitted (constraint #7 compat).
+        assert!(!cfg.agents[0].allow_pyramid);
+        assert_eq!(cfg.agents[0].max_position_units, None);
+        assert!(matches!(cfg.agents[0].strategy, StrategySpec::Atr { .. }));
+    }
+
+    #[test]
+    fn old_configs_without_new_fields_still_parse() {
+        let cfg: RunConfig = toml::from_str(&agent_toml(
+            r#"{ kind = "sma", fast = 5, slow = 20 }"#,
+            "",
+        )).unwrap();
+        assert!(matches!(cfg.agents[0].strategy, StrategySpec::Sma { fast: 5, slow: 20 }));
+        assert_eq!(cfg.snapshot_every_n_ticks, 50); // serde default intact
+    }
+
+    #[test]
+    fn parses_donchian_with_inventory_opt_in() {
+        let cfg: RunConfig = toml::from_str(&agent_toml(
+            r#"{ kind = "donchian", channel = 20 }"#,
+            "allow_pyramid = true\nmax_position_units = 250.0",
+        )).unwrap();
+        assert!(cfg.agents[0].allow_pyramid);
+        assert_eq!(cfg.agents[0].max_position_units, Some(250.0));
+    }
+
+    #[test]
+    fn oanda_table_defaults_to_practice_and_parses_custom() {
+        // Missing [oanda] entirely: practice URL, empty account.
+        let cfg: RunConfig = toml::from_str(&agent_toml(
+            r#"{ kind = "sma", fast = 5, slow = 20 }"#,
+            "",
+        )).unwrap();
+        assert_eq!(cfg.oanda.base_url, "https://api-fxpractice.oanda.com");
+        assert!(cfg.oanda.account_id.is_empty());
+        // Explicit table respected.
+        let text = agent_toml(r#"{ kind = "sma", fast = 5, slow = 20 }"#, "")
+            + "\n[oanda]\nbase_url = \"https://api-fxtrade.oanda.com\"\naccount_id = \"001\"\n";
+        let cfg: RunConfig = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.oanda.base_url, "https://api-fxtrade.oanda.com");
+        assert_eq!(cfg.oanda.account_id, "001");
     }
 }

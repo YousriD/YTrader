@@ -2,7 +2,7 @@
 
 > Goal: make paper mode honest BEFORE adding any live broker. Do not add `broker-oanda`, real news, or analytics until P0 is green. Work in order P0 -> P1 -> P2. Each task lists files to touch, exact acceptance criteria, and how to verify.
 >
-> STATUS 2026-09-13: P0 DONE (14 tests green) + P1-1 DONE (19 tests: 9 broker-paper + 7 agent-runtime + 3 persistence). Crash resume via `--resume` works e2e. Next: P1-2.
+> STATUS 2026-09-13: P0 + P1 + P2-1-venue + P2-2 + P2-4 DONE (69 tests). OANDA practice adapter live with mechanical guards; real-money host refused. Next: P2-5 feeds (P2-3 licensing when selling nears).
 
 ## Global rules (obey on every task)
 
@@ -43,15 +43,17 @@ Agreed algo direction (educational, not advice): one strategy per agent per symb
 - Evidence: 3 persistence tests (round-trip+corrupt-skip, fold/latest-wins/no-resurrect, newest-file); `restore_*` tests in broker/agent; e2e fresh 6-tick run → `--resume` run prints `Resuming 'x' — balance=...` with prior balances.
 - Verify: `cargo test -p persistence && cargo test -p agent-runtime` green.
 
-### P1-2 Inventory-aware SMA
-- Touch: `strategy-sma/src/lib.rs:41-58`
-- Do: if `ctx.account.open_units != 0`, either return `None` (skip-pyramid) or emit flatten (opposite side, `units = abs(open_units)`) before reversing. Add `allow_pyramid: bool` + `max_units: f64` fields, wire from `trading-config/src/lib.rs:21-33` + `config.toml`.
-- Accept: test with open long + bullish crossover -> no second buy when `allow_pyramid=false`.
+### P1-2 Strategy registry + inventory guards ✅ DONE
+- Landed: new `strategy-indicators` crate — `Rsi` (Wilder exits), `DonchianBreakout` (strict channel breaks), `AtrSizer` (volatility decorator: `equity*risk_pct/atr` clamped), `NewsGate` (suppress N ticks after strong-sentiment news), shared `inventory::{pyramid_blocked, clamp_units}`. SMA retrofitted with `with_inventory()` + same guards. `StrategySpec` gains `rsi/donchian/atr/news_gated` (recursive nesting); `AgentSpec` gains `allow_pyramid` (default false) + `max_position_units` (default = units); orchestrator builds via recursive `build_strategy()` + `contains_llm()` gating at any depth; sample `config.toml` carries commented registry examples.
+- Known limits: guard is skip-only (no auto-flatten — SL/TP exits); ATR sizer is margin-unaware (broker rejects unaffordable sizes, correctly but noisily — consider balance-aware cap as follow-up); LLM-as-regime-router not yet built (LLM still direct-places via Hybrid).
+- Evidence: 14 indicator tests (synthetic sequences: RSI exit-buy, flat-silence, pyramid-block; Donchian both directions + flat; ATR calm-vs-wild sizing + pre-ready passthrough; gate trip/cooldown/recover + weak-news passthrough) + 3 config parse tests (nested wrappers, old-config compat, opt-in) + 2 orchestrator builder tests + live 30-tick registry run (nested ATR(NewsGate(Donchian)) placed orders through all 3 layers).
+- Verify: `cargo test -p strategy-indicators -p trading-config` green.
 
-### P1-3 Lag + feed fixes
-- Touch: `orchestrator/src/main.rs:113-145,187-203`
-- Do: count `Lagged(n)` per agent, emit `OrderRejected("tick-lag-skipped")` or log metric; change producer to per-symbol feeds (`HashMap<symbol, MockFeed>`) instead of `agents[0].symbol`.
-- Accept: multi-symbol config fans out correctly; lag no longer silent.
+### P1-3 Per-symbol feeds + lag accounting ✅ DONE
+- Landed: `symbols_of()` fan-out key; one `MockFeed` + broadcast channel per distinct symbol (same-symbol agents share a walk; symbols never cross); global news fan-out kept (mock news has no symbol attribution — documented); `Lagged(n)` counted per agent, printed + persisted as `tick_lag` records, totals in final report (`lagged=incidents/ticks`).
+- Manual procedure (per prompt: test or documented procedure): run the two-symbol config (`eu-sma` on EUR_USD + `gb-donch` on GBP_USD, 10 ticks) — observed per-symbol orders at different ticks (`gb-donch` Sell GBP_USD t4, `eu-sma` Buy EUR_USD t6) and `lagged=0/0` lines. Independence is structural: separate feed instances + separate RNG draws per symbol key; histories are per-agent and fed only from their symbol channel.
+- Evidence: `symbols_of` unit test + the e2e run above.
+- Verify: `cargo test -p orchestrator` green.
 
 ## P2 — Sellable hardening (do last, demo-first, Rust-only)
 
@@ -64,21 +66,58 @@ replay + stats thresholds exist. Hot path stays sync in-process Rust;
 all network I/O (broker REST/WS, news polling, LLM calls) on spawned
 tasks with timeouts + cooldowns — the zero-latency principle.
 
-- `P2-1` Decimal money (`rust_decimal`), per-venue `min_units` /
-  `min_notional` / spread / commission in config. Paper simulates them
-  so a $100 stake is validated per venue BEFORE any demo run (many
-  brokers min 1000 units ≈ $1100 notional — incompatible; OANDA-style
-  1-unit minimums fit).
-- `P2-2` Performance analytics + trackers (`analytics` crate, offline,
-  reads logs via `read_all()`): equity curve, Sharpe/Sortino, max
-  drawdown, win rate, profit factor, exposure — broken down per
-  agent / symbol / strategy. Plus a log-tailing live tracker for the
-  console. Promotion demo→live requires green thresholds here.
+- `P2-1` Venue economics ✅ DONE (decimal explicitly deferred, see below).
+  Landed: `PaperBroker` venue rulebook — `min_units` (default 1.0),
+  `min_notional` (default off), `commission_per_unit` on every fill
+  incl. forced SL/TP exits, `spread_pips` override; per-agent config
+  knobs (all serde-optional) applied on fresh AND resume paths via
+  `apply_venue_economics()`; sample `config.toml` example. E2E: $100
+  agent with $0.01/unit commission → $99.47 after one round.
+  DECISION (documented, reversible): `rust_decimal` migration deferred.
+  13-crate f64→Decimal rewrite is high-risk / near-zero behavioral gain
+  at this stage — tests already enforce tolerance discipline (`never
+  ==` rule, CODEMAP G3) and amounts are small. Revisit only if cumulative
+  rounding shows in analytics, or when a venue adapter demands exact
+  decimal serialization.
+- `P2-2` Performance analytics + trackers ✅ DONE.
+  Landed: `analytics` crate (lib + CLI) — broker-identical average-cost
+  trade reconstruction (snapshot-seeded, orphan closes counted not
+  invented, pre-price logs skipped); per-agent + portfolio metrics on
+  total-value curves (splits never fake drawdowns): drawdown, Sharpe/
+  Sortino per-tick, win rate, profit factor, expectancy, time-in-market;
+  `Thresholds` + `evaluate()` demo→live gate (defaults: 20 trades, PF
+  ≥1.0, DD ≤25%; death always fails); `report` (text/JSON), `gate`
+  (exit 1 with named reasons), `track` (log-tailing console).
+  Log enrichment that unlocked it: `OrderPlaced{price}`,
+  `SL/TP{closed_units}` (agent-runtime + persist shapes).
+  E2E: 300-tick scalper log → 34 trades, PF 0.58, gate FAILs with
+  reasons (correct — random-walk scalping loses to spread).
+  Known limits: P&L gross of commission (commissions live in equity
+  metrics); resumed-run pre-log opens reconcile via snapshots; Sharpe
+  unannualized (ticks have no clock).
+  Verify: `cargo test -p analytics` (17) green.
 - `P2-3` Real `licensing::check()` signature verification (Ed25519 offline).
-- `P2-4` Venue adapters, one crate each implementing `Broker` + real
-  `reconcile()` (query open positions/orders on startup): start with
-  `broker-oanda` (practice + live base URLs), then next venue by demand.
-  Each lands with its demo config + recorded demo-run stats first.
+- `P2-4` Venue adapters ✅ DONE (OANDA practice; more venues by demand).
+  Landed: `broker-oanda` — market orders with signed-unit mapping,
+  account mirror + genuine `reconcile()` (summary + openPositions +
+  best-effort pricing; hedged positions refused loudly), redacted Debug,
+  10s client timeout, `withdraw()` explicitly unsupported (splits defer
+  via existing agent logic). Practice-only is mechanical:
+  `is_practice_url()` allowlists the practice host (https, exact host —
+  lookalikes fail); orchestrator live mode additionally requires
+  `[oanda] account_id`, `OANDA_API_KEY` env (never config), distinct
+  symbols per agent, and a successful opening reconcile per agent —
+  ANY failure aborts the whole run (fail closed). Verified: trade host
+  refused, missing account/key refused, dummy-key run reached the real
+  API, parsed its auth error, and aborted exit 1.
+  Demo procedure (needs user practice credentials — not runnable here):
+  token in env → uncomment `[oanda]` template → `mode="live"` →
+  `analytics gate` on the log → record stats before trusting anything.
+  Ignored read-only practice test scaffolded (`-- --ignored`).
+  Known limits: shared-account symbols must be distinct (sub-accounts
+  follow-up); marks between reconciles are feed-provided (venue pricing
+  feed is future work); second venue not started.
+  Verify: `cargo test -p broker-oanda` (8 + 1 ignored) green.
 - `P2-5` World-info feeds, one crate each implementing `NewsFeed`:
   economic calendar first (rates/CPI/NFP drive FX more than headlines),
   then headline APIs (e.g. Finnhub/AlphaVantage-style) with LLM

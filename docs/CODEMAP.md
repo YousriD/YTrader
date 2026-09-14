@@ -8,7 +8,9 @@
 |---|---|---|---|
 | `core` | `core/src/lib.rs` | Trait contracts. No logic. | `Broker` (+`withdraw` at :127, `reconcile` at :119), `MarketFeed`, `NewsFeed`, `Strategy`, `Order`, `Side`, `Fill`, `AccountState`, `Candle`, `NewsItem`, `MarketContext`, `RunMode`, `BrokerError` |
 | `broker-paper` | `broker-paper/src/lib.rs` | Simulated fills. | `PaperBroker::new()` / `restore()`, `with_max_leverage()` (1x), venue: `with_min_units/notional/commission/spread_pips`, `place_order()`, `withdraw()` (12 tests) |
-| `broker-oanda` | `broker-oanda/src/lib.rs` | P2-4 REAL adapter, practice-host only. | `OandaBroker::new(url, key, account, symbol)`, `is_practice_url()`, `parse_fill/parse_balance/parse_position/parse_mid/map_api_error`, genuine `reconcile()`, `withdraw()` always errors (8 tests + 1 ignored live) |
+| `broker-oanda` | `broker-oanda/src/lib.rs` | P2-4 REAL adapter, practice-host only. | `OandaBroker`, `is_practice_url()`, genuine `reconcile()` (8 tests + 1 ignored live) |
+| `broker-mt5` | `broker-mt5/src/lib.rs` + `mt5-sidecar/` + `bridge-mt5/YTraderNativeBridge.mq5` | P2-7 MT5 demo via localhost bridge. | `Mt5Broker`, native Rust sidecar, MT5 EA with DEMO-only order gate, units↔lots (8 adapter tests; terminal integration untested). |
+| `mt5-sidecar` | `mt5-sidecar/src/main.rs` | Loopback rendezvous for the Rust broker and MT5 EA. | serves adapter state/order endpoints; EA publishes state and polls commands. |
 | `feed-mock` | `feed-mock/src/lib.rs` | Random-walk prices. | `MockFeed::new(start_price, vol)`, `next_price()` |
 | `news-mock` | `news-mock/src/lib.rs` | Fake headlines. | `MockNewsFeed::new(every_n_ticks)`, `next_headline()` (global fan-out; no attribution) |
 | `news-calendar` | `news-calendar/src/lib.rs` | P2-5 REAL calendar (keyless weekly JSON). | `CalendarFeed` (hourly cache, dedup, degrades silent), `parse_calendar()`, `Impact`, `CalendarEvent`, `fetch_events()` (5 tests + 1 ignored live) |
@@ -21,7 +23,7 @@
 | `persistence` | `persistence/src/lib.rs` | JSONL append-only log + resume fold. | `EventLog::open()`, `append()`, `EventLog::read_all()`, `latest_run_file()`, `load_snapshots()`, `Snapshot`. Tests (3). |
 | `trading-config` | `trading-config/src/lib.rs` | `config.toml` parser. | `RunConfig::load()`, `Mode`, `AgentSpec`, `StrategySpec`, `snapshot_every_n_ticks` (default 50) |
 | `licensing` | `licensing/src/lib.rs` | No-op seam. | `check()` -> `LicenseStatus::Unlicensed/Valid/Invalid` |
-| `orchestrator` | `orchestrator/src/main.rs` | Binary, wiring only. | `main()`, `--resume` flag, `TickMsg`, `LogMsg` (Event/Snapshot/TickLag/Final), `build_strategy()`, `print_event()` (fills show price) |
+| `orchestrator` | `orchestrator/src/main.rs` | Binary, wiring only. | `main()`, `--resume` flag, `TickMsg`, `LogMsg` (Event/Snapshot/TickLag/Final), `build_strategy()`, `resolve_live_venue()` (pure, unit-tested gates), `print_event()` (fills show price) |
 | `analytics` | `analytics/src/` | P2-2 offline stats: reconstruction, metrics, gate, CLI. | `reconstruct()`, `analyze()`, `evaluate()`, `Thresholds`, `report/gate/track` cmds (17 tests) |
 
 Root files:
@@ -93,7 +95,8 @@ strategy = { kind = "sma", fast = 5, slow = 20 }
 - `G1` FIXED P1-3: one feed per distinct symbol (`symbols_of()`); same-symbol agents share a walk, symbols never cross. News still fanned out globally (mock has no attribution).
 - `G2` FIXED P1-3: `Lagged(n)` counted per agent, printed + persisted as `tick_lag`, totals in final report (`lagged=i/t`). Still hits slow LLM agents first (8s timeout).
 - `G3` Money is `f64` everywhere. No decimal type. Tests compare with tolerance, never `==`.
-- `G4` Tests: 95 green — 12 broker-paper + 8 broker-oanda (+1 ignored live) + 9 agent-runtime + 3 persistence + 18 strategy-indicators + 7 trading-config + 6 orchestrator + 1 resume-e2e + 17 analytics + 5 news-calendar (+1 ignored live) + 9 strategy-router. Still no strategy-llm/hybrid/feed-mock/news-mock tests.
+- `G4` Tests: 107 green — 12 broker-paper + 8 broker-oanda (+1 ignored live) + 8 broker-mt5 + 9 agent-runtime + 3 persistence + 18 strategy-indicators + 8 trading-config + 9 orchestrator + 1 resume-e2e + 17 analytics + 5 news-calendar (+1 ignored live) + 9 strategy-router. Still no strategy-llm/hybrid/feed-mock/news-mock tests.
+- `G10` Live dispatch (P2-7): `live_venue = "oanda"|"mt5"` + pure `resolve_live_venue()` gates; MT creds never enter the repo (terminal-only); main-binary execution may be OS-blocked on locked-down boxes — unit tests are the portable verification path.
 - `G9` Log fill shapes (P2-2) + regime events (P2-6): `order_placed{price}`, `stop_loss/take_profit_hit{closed_units}`, `regime_selected{strategy}`. Reconstruction mirrors broker average-cost matching; snapshots re-seed it; orphan closes counted, never invented.
 - `G5` FIXED P0-2: split calls `broker.withdraw()`, baseline = post-withdraw equity. Defers (OrderRejected) while profit is unrealized — see `split_defers_while_profit_is_unrealized` test.
 - `G6` FIXED P0-1: margin check is exposure-based both sides (closes always pass). 1x default via `with_max_leverage()`.

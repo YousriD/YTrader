@@ -1,0 +1,50 @@
+# yTrader MT5 bridge validation run (P2-7). Paperwork for the procedure:
+# terminal + bridge.py running locally, then this file.
+#
+# EASY PATH (Windows): double-click start-mt5-demo.bat — it checks
+# Python, starts the bridge in its own window, waits for health, then
+# runs this file with the full console. MANUAL PATH below.
+#
+# SETUP (do this, in order):
+#   1. Install the MT5 terminal, log into your DEMO account once.
+#   2. pip install MetaTrader5
+#   3. start-mt5-demo.bat            # native EA + Rust sidecar (localhost:5001)
+#   4. cargo run -p orchestrator -- demo-mt5.toml
+#   5. cargo run -p analytics -- gate data/run-<ts>.jsonl --min-trades 1
+#
+# SAFETY (mechanical):
+# - reconcile() refuses non-DEMO trade_mode AND dead terminals (fail closed).
+# - base_url must be localhost (remote URLs refused: plaintext orders).
+# - 1 micro lot (0.01 = 1,000 units) per order, distinct symbols.
+# - Your MT credentials live ONLY in the terminal. yTrader never sees them.
+#   Do not paste them into chat, files, or anywhere else.
+
+mode = "live"
+live_venue = "mt5"
+ticks = 60
+tick_delay_ms = 100
+news_every_n_ticks = 15
+snapshot_every_n_ticks = 20
+
+[mt5]
+base_url = "http://127.0.0.1:5001"
+
+[[agents]]
+id = "mt-eur"
+symbol = "EUR_USD"
+stake_min = 10.0
+stake_max = 10.0
+units = 1000.0
+stop_loss_pct = 0.01
+take_profit_pct = 0.02
+strategy = { kind = "sma", fast = 2, slow = 5 }
+
+[[agents]]
+id = "mt-gbp"
+symbol = "GBP_USD"
+stake_min = 10.0
+stake_max = 10.0
+units = 1000.0
+stop_loss_pct = 0.01
+take_profit_pct = 0.02
+strategy = { kind = "donchian", channel = 5 }

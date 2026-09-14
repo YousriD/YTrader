@@ -1,0 +1,53 @@
+# yTrader first live validation run (P2-4 demo procedure).
+#
+# PURPOSE: prove the OANDA practice path end-to-end (orders, fills,
+# reconcile, logging, analytics) with dust-sized orders. NOT a strategy
+# test — prices are still the mock walk (venue pricing feed is future
+# work), so expect random-walk results. Gate the log afterwards.
+#
+# SETUP (do this, in order):
+#   1. Open an OANDA practice account, generate a personal token.
+#   2. Copy this file FIRST (copies are gitignored, this template is shared):
+#        Copy-Item demo-config.toml my-demo.toml   # PowerShell
+#   3. Put the token in .env (see .env.example) or $env:OANDA_API_KEY.
+#      NEVER commit tokens, keys, or your edited copy.
+#   4. Set account_id in YOUR COPY to your practice account id.
+#   5. cargo run -p orchestrator -- my-demo.toml
+#   6. cargo run -p analytics -- gate data/run-<ts>.jsonl --min-trades 1
+#      (min-trades lowered: this run proves plumbing, not edge)
+#
+# SAFETY (mechanical, not promises):
+# - mode = "live" works ONLY against api-fxpractice.oanda.com.
+# - Every order here is 1 unit (~$1 notional). Total exposure < $5.
+# - Distinct symbols per agent (shared-account positions would merge).
+# - Any failure (auth, reconcile, margin) aborts the run, exit 1.
+
+mode = "live"
+ticks = 60
+tick_delay_ms = 100
+news_every_n_ticks = 15
+snapshot_every_n_ticks = 20
+
+[oanda]
+base_url = "https://api-fxpractice.oanda.com"
+account_id = "PASTE-PRACTICE-ACCOUNT-ID"
+
+[[agents]]
+id = "demo-sma"
+symbol = "EUR_USD"
+stake_min = 10.0
+stake_max = 10.0
+units = 1.0
+stop_loss_pct = 0.01
+take_profit_pct = 0.02
+strategy = { kind = "sma", fast = 2, slow = 5 }
+
+[[agents]]
+id = "demo-donch"
+symbol = "GBP_USD"
+stake_min = 10.0
+stake_max = 10.0
+units = 1.0
+stop_loss_pct = 0.01
+take_profit_pct = 0.02
+strategy = { kind = "donchian", channel = 5 }

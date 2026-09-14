@@ -140,15 +140,25 @@ pub struct AgentSpec {
     /// Spread in pips (default 1.2 in the broker).
     #[serde(default)]
     pub spread_pips: Option<f64>,
+    /// Venue-native symbol override (P2-7): e.g. MT5 `EURUSD.a` when the
+    /// default mapping (`EUR_USD` → `EURUSD`) doesn't match the broker.
+    /// Omit for default mapping.
+    #[serde(default)]
+    pub venue_symbol: Option<String>,
     pub strategy: StrategySpec,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunConfig {
     /// "test" = paper trading only, always safe.
-    /// "live" = real OANDA adapter, practice host ONLY (any other
-    /// base_url keeps refusing — see `broker_oanda::is_practice_url`).
+    /// "live" = real venue adapter per `live_venue` (OANDA practice or
+    /// local MT5 bridge). Anything unconfigured/misconfigured refuses —
+    /// see the per-venue gates, never a silent paper run.
     pub mode: Mode,
+    /// Which venue live mode uses: `"oanda"` (default when its account
+    /// is set) or `"mt5"`. Anything else refuses. Ignored in test mode.
+    #[serde(default)]
+    pub live_venue: Option<String>,
     pub ticks: u32,
     pub tick_delay_ms: u64,
     pub news_every_n_ticks: u32,
@@ -161,6 +171,10 @@ pub struct RunConfig {
     /// ignores it entirely. API key NEVER lives here — env only.
     #[serde(default)]
     pub oanda: OandaConfig,
+    /// Venue connection (P2-7). Only read when `live_venue = "mt5"`.
+    /// No credentials by design — MT logins stay in the terminal.
+    #[serde(default)]
+    pub mt5: Mt5Config,
     pub agents: Vec<AgentSpec>,
 }
 
@@ -175,6 +189,26 @@ pub struct OandaConfig {
     /// Practice account id, e.g. "101-001-23456789-001".
     #[serde(default)]
     pub account_id: String,
+}
+
+/// Local MT5 bridge connection (P2-7). No credentials here by design —
+/// MT logins live in the terminal; this crate only knows where the
+/// localhost bridge listens.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Mt5Config {
+    /// Default: local bridge. Remote URLs are refused mechanically.
+    #[serde(default = "default_mt5_base_url")]
+    pub base_url: String,
+}
+
+impl Default for Mt5Config {
+    fn default() -> Self {
+        Self { base_url: default_mt5_base_url() }
+    }
+}
+
+fn default_mt5_base_url() -> String {
+    "http://127.0.0.1:5001".to_string()
 }
 
 impl Default for OandaConfig {
@@ -320,5 +354,22 @@ strategy = {strategy}
         let cfg: RunConfig = toml::from_str(&text).unwrap();
         assert_eq!(cfg.oanda.base_url, "https://api-fxtrade.oanda.com");
         assert_eq!(cfg.oanda.account_id, "001");
+    }
+
+    #[test]
+    fn mt5_table_and_live_venue_parse_with_defaults() {
+        // Missing entirely: localhost bridge default, no venue selected.
+        let cfg: RunConfig = toml::from_str(&agent_toml(
+            r#"{ kind = "sma", fast = 5, slow = 20 }"#,
+            "",
+        )).unwrap();
+        assert_eq!(cfg.mt5.base_url, "http://127.0.0.1:5001");
+        assert_eq!(cfg.live_venue, None);
+        // Venue override symbol parses on the agent.
+        let cfg: RunConfig = toml::from_str(&agent_toml(
+            r#"{ kind = "sma", fast = 5, slow = 20 }"#,
+            "venue_symbol = \"EURUSD.a\"",
+        )).unwrap();
+        assert_eq!(cfg.agents[0].venue_symbol.as_deref(), Some("EURUSD.a"));
     }
 }

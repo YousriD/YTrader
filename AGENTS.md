@@ -33,6 +33,7 @@ Run output: console + `data/run-<timestamp>.jsonl` (append-only; snapshots every
 - LLM invariant (all present and future LLM touchpoints — router, tuners, scorers): deterministic default + degrade loudly (log it) + bounded call time (timeout/cooldown) + never inside the risk layer. Anything proposed without all four is rejected as Tier 4.
 - P0 + P1 + P2-1-venue + P2-2 + P2-4 + P2-5 + P2-6 are DONE (95 tests). Left: P2-3 licensing when selling nears; follow-ups (headline APIs, ATR margin-awareness, router debounce, LLM-brain live-fire). Live = OANDA practice only; trade host refused mechanically.
 - Money is `f64` — do not migrate to decimal without a P2 task.
+- Secrets via env/`.env` only (`.env.example` is the committed template; `.env`, `*-local.toml`, keys/tokens are gitignored). Never log keys (`OandaBroker` Debug redacts); never invent a new secret channel — env only.
 - After every edit: `cargo test` + `cargo build -p orchestrator`. Update `docs/CODEMAP.md` if behavior changed.
 
 ## 5. Where to edit (common tasks)

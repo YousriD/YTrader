@@ -71,6 +71,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
+name = "broker-mt5"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "trading-core",
+]
+
+[[package]]
 name = "broker-oanda"
 version = "0.1.0"
 dependencies = [
@@ -177,6 +190,12 @@ dependencies = [
  "quote",
  "syn 3.0.5",
 ]
+
+[[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "equivalent"
@@ -599,6 +618,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mt5-sidecar"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "news-calendar"
 version = "0.1.0"
 dependencies = [
@@ -642,9 +668,11 @@ version = "0.1.0"
 dependencies = [
  "agent-runtime",
  "async-trait",
+ "broker-mt5",
  "broker-oanda",
  "broker-paper",
  "chrono",
+ "dotenvy",
  "feed-mock",
  "licensing",
  "news-mock",

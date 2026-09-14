@@ -9,6 +9,8 @@ members = [
     "strategy-sma",
     "strategy-indicators",
     "strategy-router",
+    "broker-mt5",
+    "mt5-sidecar",
     "broker-oanda",
     "strategy-llm",
     "strategy-hybrid",

@@ -1,4 +1,5 @@
 use agent_runtime::{Agent, AgentEvent, AgentStatus};
+use broker_mt5::{is_local_bridge_url, mt5_symbol, Mt5Broker};
 use broker_oanda::{is_practice_url, OandaBroker};
 use broker_paper::PaperBroker;
 use chrono::Utc;
@@ -56,8 +57,75 @@ enum LogMsg {
     },
 }
 
+/// Which real venue live mode trades through (P2-4 OANDA, P2-7 MT5).
+#[derive(Debug, Clone, PartialEq)]
+enum LiveVenue {
+    Oanda { api_key: String, account_id: String },
+    Mt5,
+}
+
+/// Pure live-venue resolution: every refusal branch as a testable
+/// `Err(message)`. `main()` prints the message and exits 1 — the
+/// function itself never exits, so unit tests assert every branch
+/// without executing the binary (matters under app-control policies).
+fn resolve_live_venue(
+    is_live: bool,
+    live_venue: Option<&str>,
+    oanda_base_url: &str,
+    oanda_account_id: &str,
+    oanda_key: Option<&str>,
+    mt5_base_url: &str,
+    distinct_symbols: bool,
+) -> Result<Option<LiveVenue>, String> {
+    if !is_live {
+        return Ok(None);
+    }
+    // Every live venue nets same-symbol positions per account, which
+    // would corrupt per-agent accounting.
+    if !distinct_symbols {
+        return Err("LIVE mode refused: agents share symbols on one venue account. Give each live agent its own symbol (sub-accounts are the follow-up).".to_string());
+    }
+    // Explicit live_venue wins; legacy OANDA config (account set, no
+    // live_venue key) keeps working unchanged.
+    let which = live_venue.or(if !oanda_account_id.is_empty() { Some("oanda") } else { None });
+    match which {
+        Some("oanda") => {
+            if !is_practice_url(oanda_base_url) {
+                return Err(format!(
+                    "LIVE mode refused: base_url is not the OANDA practice host. Got: {oanda_base_url}"
+                ));
+            }
+            if oanda_account_id.is_empty() {
+                return Err("LIVE mode refused: [oanda] account_id is not set (see demo template in config.toml).".to_string());
+            }
+            match oanda_key {
+                Some(k) if !k.is_empty() => Ok(Some(LiveVenue::Oanda {
+                    api_key: k.to_string(),
+                    account_id: oanda_account_id.to_string(),
+                })),
+                _ => Err("LIVE mode refused: OANDA_API_KEY env is not set.".to_string()),
+            }
+        }
+        Some("mt5") => {
+            if !is_local_bridge_url(mt5_base_url) {
+                return Err(format!(
+                    "LIVE mode refused: mt5 base_url is not a localhost bridge. Got: {mt5_base_url}"
+                ));
+            }
+            Ok(Some(LiveVenue::Mt5))
+        }
+        _ => Err("LIVE mode refused: no venue configured. Set live_venue = \"oanda\" (+ [oanda] account) or \"mt5\" (+ bridge running).".to_string()),
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    // Secrets come from the environment ONLY (never config files, never
+    // logs). A local `.env` file is loaded here if present — it is
+    // gitignored (see .gitignore + .env.example). Real env vars win over
+    // `.env` entries, so CI/prod injection keeps working.
+    let _ = dotenvy::dotenv();
+
     // --- Licensing seam (no-op today; real check goes here later) ---
     match licensing::check() {
         licensing::LicenseStatus::Unlicensed => {
@@ -93,39 +161,29 @@ async fn main() {
 
     println!("=== Autonomous FX Trading System — mode: {:?} ===\n", config.mode);
     let is_live = matches!(config.mode, Mode::Live);
-    // P2-4 live gate: the OANDA practice host ONLY. Anything else —
-    // real-money host, http, lookalikes, missing account/key — refuses
-    // EXACTLY like before. Credentials never touch the config file.
-    let oanda_creds: Option<(String, String)> = if is_live {
-        if !is_practice_url(&config.oanda.base_url) {
-            eprintln!("LIVE mode refused: base_url is not the OANDA practice host.");
-            eprintln!("Got: {}", config.oanda.base_url);
-            eprintln!("Live runs against practice ONLY (https://api-fxpractice.oanda.com).");
-            std::process::exit(1);
-        }
-        if config.oanda.account_id.is_empty() {
-            eprintln!("LIVE mode refused: [oanda] account_id is not set (see demo template in config.toml).");
-            std::process::exit(1);
-        }
-        let api_key = match std::env::var("OANDA_API_KEY") {
-            Ok(k) if !k.is_empty() => k,
-            _ => {
-                eprintln!("LIVE mode refused: OANDA_API_KEY env is not set.");
-                std::process::exit(1);
+    // Live venue dispatch (P2-4 OANDA, P2-7 MT5): pure resolution below,
+    // refusal prints + exits here. Every branch fully qualifies or dies.
+    let live_venue: Option<LiveVenue> = match resolve_live_venue(
+        is_live,
+        config.live_venue.as_deref(),
+        &config.oanda.base_url,
+        &config.oanda.account_id,
+        std::env::var("OANDA_API_KEY").ok().as_deref(),
+        &config.mt5.base_url,
+        symbols_of(&config.agents).len() == config.agents.len(),
+    ) {
+        Ok(v) => {
+            if matches!(v, Some(LiveVenue::Oanda { .. })) {
+                println!("LIVE mode: OANDA practice adapter (reconciled, fail-closed).\n");
+            } else if matches!(v, Some(LiveVenue::Mt5)) {
+                println!("LIVE mode: local MT5 bridge (DEMO-only, reconciled, fail-closed).\n");
             }
-        };
-        // One OANDA account merges same-symbol positions across agents,
-        // which would corrupt per-agent accounting: require distinct
-        // symbols (sub-accounts per agent is the follow-up).
-        if symbols_of(&config.agents).len() != config.agents.len() {
-            eprintln!("LIVE mode refused: agents share symbols on one OANDA account.");
-            eprintln!("Give each live agent its own symbol (or its own sub-account per broker-oanda docs).");
+            v
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
             std::process::exit(1);
         }
-        println!("LIVE mode: OANDA practice adapter (reconciled, fail-closed).\n");
-        Some((api_key, config.oanda.account_id.clone()))
-    } else {
-        None
     };
 
     // --- Crash recovery (P1-1): opt-in resume from the newest log ---
@@ -209,7 +267,7 @@ async fn main() {
 
         let mut agent = match snapshots.get(&spec.id) {
             // Paper resume path (test mode only — live always reconciles).
-            Some(snap) if oanda_creds.is_none() => {
+            Some(snap) if live_venue.is_none() => {
                 match PaperBroker::restore(snap.balance, snap.open_units, snap.entry_price.unwrap_or(0.0)) {
                     Ok(broker) => {
                         println!(
@@ -238,7 +296,8 @@ async fn main() {
                 // LIVE path: venue truth via fail-closed reconcile.
                 // Snapshots are ignored here — the account is truth, and
                 // a stale snapshot must never override it.
-                if let Some((api_key, account_id)) = &oanda_creds {
+                match &live_venue {
+                    Some(LiveVenue::Oanda { api_key, account_id }) => {
                     if snapshots.contains_key(&spec.id) {
                         println!("LIVE '{}': ignoring old snapshot — venue reconcile is truth.", spec.id);
                     }
@@ -263,8 +322,35 @@ async fn main() {
                             std::process::exit(1);
                         }
                     }
-                } else {
+                    }
+                    Some(LiveVenue::Mt5) => {
+                        if snapshots.contains_key(&spec.id) {
+                            println!("LIVE '{}': ignoring old snapshot — venue reconcile is truth.", spec.id);
+                        }
+                        let mut mb = Mt5Broker::new(
+                            config.mt5.base_url.clone(),
+                            mt5_symbol(&spec.symbol, spec.venue_symbol.as_deref()),
+                            spec.id.clone(),
+                        );
+                        match mb.reconcile().await {
+                            Ok(()) => {
+                                let st = mb.account_state();
+                                println!(
+                                    "LIVE '{}': reconciled — balance=${:.2} open_units={}",
+                                    spec.id, st.balance, st.open_units
+                                );
+                                let baseline = st.equity;
+                                Agent::new(spec.id.clone(), spec.symbol.clone(), strategy, Box::new(mb), baseline)
+                            }
+                            Err(e) => {
+                                eprintln!("LIVE '{}': opening reconcile failed ({e}) — aborting run (fail closed).", spec.id);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    None => {
                     Agent::new(spec.id.clone(), spec.symbol.clone(), strategy, Box::new(apply_venue_economics(PaperBroker::new(stake), spec)), stake)
+                    }
                 }
             }
         };
@@ -775,10 +861,70 @@ mod tests {
             min_notional: None,
             commission_per_unit: 0.0,
             spread_pips: None,
+            venue_symbol: None,
             strategy: StrategySpec::Sma { fast: 5, slow: 20 },
         };
         let agents = vec![mk("a", "EUR_USD"), mk("b", "EUR_USD"), mk("c", "GBP_USD")];
         assert_eq!(symbols_of(&agents), vec!["EUR_USD", "GBP_USD"]);
         assert!(symbols_of(&[]).is_empty());
+    }
+
+    fn venue_args(
+        mode_live: bool,
+        live_venue: Option<&str>,
+        oanda_url: &str,
+        oanda_acct: &str,
+        key: Option<&str>,
+        mt5_url: &str,
+        distinct: bool,
+    ) -> Result<Option<LiveVenue>, String> {
+        resolve_live_venue(mode_live, live_venue, oanda_url, oanda_acct, key, mt5_url, distinct)
+    }
+
+    #[test]
+    fn venue_test_mode_never_live() {
+        assert_eq!(
+            venue_args(false, Some("mt5"), "", "", None, "http://127.0.0.1:5001", true),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn venue_refuses_everything_misconfigured() {
+        // No venue at all.
+        assert!(venue_args(true, None, "https://api-fxpractice.oanda.com", "", None, "http://127.0.0.1:5001", true)
+            .is_err());
+        // Unknown venue name.
+        assert!(venue_args(true, Some("coinbase"), "", "", None, "http://127.0.0.1:5001", true).is_err());
+        // OANDA: trade host refused.
+        assert!(venue_args(true, Some("oanda"), "https://api-fxtrade.oanda.com", "1", Some("k"), "", true).is_err());
+        // OANDA: missing account / missing key.
+        assert!(venue_args(true, Some("oanda"), "https://api-fxpractice.oanda.com", "", Some("k"), "", true).is_err());
+        assert!(venue_args(true, Some("oanda"), "https://api-fxpractice.oanda.com", "1", None, "", true).is_err());
+        assert!(venue_args(true, Some("oanda"), "https://api-fxpractice.oanda.com", "1", Some(""), "", true).is_err());
+        // MT5: remote URL refused.
+        assert!(venue_args(true, Some("mt5"), "", "", None, "http://192.168.1.10:5001", true).is_err());
+        assert!(venue_args(true, Some("mt5"), "", "", None, "https://127.0.0.1:5001", true).is_err());
+        // Shared symbols refused on every venue.
+        assert!(venue_args(true, Some("mt5"), "", "", None, "http://127.0.0.1:5001", false).is_err());
+    }
+
+    #[test]
+    fn venue_accepts_qualified_configs() {
+        // Explicit MT5 + localhost.
+        assert_eq!(
+            venue_args(true, Some("mt5"), "", "", None, "http://127.0.0.1:5001", true),
+            Ok(Some(LiveVenue::Mt5))
+        );
+        // Explicit OANDA practice + account + key.
+        assert!(matches!(
+            venue_args(true, Some("oanda"), "https://api-fxpractice.oanda.com", "1", Some("k"), "", true),
+            Ok(Some(LiveVenue::Oanda { .. }))
+        ));
+        // Legacy: no live_venue key, OANDA account set, key present.
+        assert!(matches!(
+            venue_args(true, None, "https://api-fxpractice.oanda.com", "1", Some("k"), "", true),
+            Ok(Some(LiveVenue::Oanda { .. }))
+        ));
     }
 }

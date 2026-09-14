@@ -1,7 +1,20 @@
 /target
 **/*.rs.bk
 data/
+# Secrets: never commit keys, tokens, or live .env files.
+# Only `.env.example` (dummy values) is tracked — everything below is ignored.
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+*credentials*
+secrets/
+# Personal run configs (copies of demo-config.toml with real account ids).
+*-local.toml
+local-*.toml
+my-demo.toml
 .idea/
 .vscode/
 *.pdb

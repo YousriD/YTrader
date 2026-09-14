@@ -7,6 +7,7 @@ edition = "2021"
 trading-core = { path = "../core" }
 broker-paper = { path = "../broker-paper" }
 broker-oanda = { path = "../broker-oanda" }
+broker-mt5 = { path = "../broker-mt5" }
 feed-mock = { path = "../feed-mock" }
 news-mock = { path = "../news-mock" }
 strategy-sma = { path = "../strategy-sma" }
@@ -22,6 +23,7 @@ tokio = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+dotenvy = "0.15"
 
 [dev-dependencies]
 async-trait = { workspace = true }

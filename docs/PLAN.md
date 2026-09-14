@@ -2,7 +2,7 @@
 
 > Goal: make paper mode honest BEFORE adding any live broker. Do not add `broker-oanda`, real news, or analytics until P0 is green. Work in order P0 -> P1 -> P2. Each task lists files to touch, exact acceptance criteria, and how to verify.
 >
-> STATUS 2026-09-14: P0 + P1 + P2-1-venue + P2-2 + P2-4 + P2-5 + P2-6 DONE (95 tests). Tier 2 router (rule + LLM brains) live. Left: P2-3 licensing when selling nears; follow-ups below.
+> STATUS 2026-09-14: P0 + P1 + P2-1-venue + P2-2 + P2-4 + P2-5 + P2-6 + P2-7 DONE (107 tests). MT5 bridge path live (untested against a real terminal — yours is the first). Left: P2-3 licensing when selling nears; follow-ups below.
 
 ## Global rules (obey on every task)
 
@@ -152,7 +152,39 @@ tasks with timeouts + cooldowns — the zero-latency principle.
   `🧭 regime →` lines and candidate orders. Known behavior: classifier
   is twitchy on random-walk noise (switches every few ticks) — switch
   debounce/hysteresis is the follow-up, not a defect.
-  Verify: router (9) + agent regime (2) + config (2) + builder (2) green.
+   Verify: router (9) + agent regime (2) + config (2) + builder (2) green.
+- `P2-7` MT5 bridge path ✅ DONE (code complete; first live-terminal run is yours).
+  Landed: `broker-mt5` — localhost bridge client, units↔lots conversion
+  via cached contract spec (step-rounded DOWN, below-minimum rejected
+  without HTTP), mirror + VWAP, DEMO-only reconcile (non-demo and dead
+  terminals fail closed), `is_local_bridge_url()` (remote URLs refused:
+  plaintext orders), `withdraw()` unsupported (splits defer).
+  `mt5-sidecar/` + `bridge-mt5/YTraderNativeBridge.mq5` — native Rust/MT5
+  polling bridge; no Python package required. The EA refuses non-demo accounts
+  and defaults to observation-only until its `EnableOrders` input is enabled.
+  6 routes mirroring the Rust client, filling-mode aware, magic-tagged
+  orders; reviewed but NEVER run against a real terminal here.
+  Config `[mt5]` (no credentials by design) + `live_venue = "mt5"` +
+  per-agent `venue_symbol`; orchestrator dispatches venues via pure
+  `resolve_live_venue()` (unit-tested refusal branches — also works
+  around machines where the main binary can't execute).
+  E2E here: mock-bridge tests (7 incl. reconcile/order/minimum/error
+  paths) + gate tests; binary-e2e blocked by an OS Application Control
+  policy on this box (documented below). On your machine:
+  `start-mt5-demo.bat` (opens the Rust sidecar, waits for native-EA health,
+  then runs `demo-mt5.toml` with full console).
+  Open: first real terminal run (your MT5 demo), bridge live-fire fixes,
+  sub-accounts, venue pricing feed.
+  Verify: `cargo test -p broker-mt5` (8) green.
+
+## Known environment issue (this dev box, 2026-09-14)
+
+`target/debugorchestrator.exe` is blocked by an OS Application Control
+policy (os error 4551) — rebuilds, renames, and `cargo run` all fail,
+while test binaries execute fine. Unit/integration tests are therefore
+the verification path here; binary e2e runs happen on your machine.
+If you hit this too: allowlist the `target/` dir in Windows Security /
+WDAC, or run from an unrestricted path.
 
 ## Explicit non-goals (do NOT do in P0/P1)
 

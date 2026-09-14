@@ -162,6 +162,7 @@ Start with [`docs/CODEMAP.md`](docs/CODEMAP.md), then read
 | `core` | Trait definitions: `Broker` (+`withdraw`, `reconcile`), `MarketFeed`, `NewsFeed`, `Strategy`. The whole extension contract. |
 | `broker-paper` | Simulated fills with spread + 1x exposure margin (both sides, closes always pass), correct flip-entry averaging, cash-only `withdraw()`, and venue economics (`min_units` / `min_notional` / per-fill commission / spread override). 12 unit tests. |
 | `broker-oanda` | REAL adapter, practice-host only: market orders, mirror + genuine `reconcile()`, hedged positions refused, key redacted in logs. 8 tests + 1 ignored live check. |
+| `broker-mt5` + `mt5-sidecar/` + `bridge-mt5/` | MT5 demo via localhost bridge: Rust adapter (units↔lots, DEMO-only reconcile), Rust loopback sidecar, and a native MT5 Expert Advisor. The EA refuses non-demo accounts and starts observation-only until `EnableOrders` is explicitly enabled. Your MT login stays in the terminal; yTrader never sees it. |
 | `feed-mock` | Random-walk price generator, no network needed. |
 | `news-mock` | Emits sample headlines with sentiment scores periodically. |
 | `news-calendar` | REAL economic calendar (free keyless weekly JSON): High-impact event times as headline items, failures degrade to silence. |
@@ -251,6 +252,18 @@ running alongside them.
    spread override, per agent). The sample `units = 1000` still dwarfs
    a $10–100 stake at ~1.10 — size down per venue. `rust_decimal`
    migration explicitly deferred (see `docs/PLAN.md:P2-1`).
+
+## Secrets (read this before your first live run)
+
+- Keys live in the environment ONLY — never in `config.toml`, never in logs
+  (`OandaBroker`'s Debug output redacts the token). For local runs, copy
+  `.env.example` to `.env` (gitignored) and fill it in; real env vars win
+  over `.env` entries, so CI injection keeps working.
+- Personal run files (`my-demo.toml`, `*-local.toml`) are gitignored —
+  copy `demo-config.toml` first, then put your account id in the copy.
+- `git check-ignore .env` should print a rule. If a secret ever lands in
+  a commit, rotate it at the venue — removal from git history is not
+  reliable.
 
 ## Honest caveats (educational software — not investment advice)
 

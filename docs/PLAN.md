@@ -2,7 +2,7 @@
 
 > Goal: make paper mode honest BEFORE adding any live broker. Do not add `broker-oanda`, real news, or analytics until P0 is green. Work in order P0 -> P1 -> P2. Each task lists files to touch, exact acceptance criteria, and how to verify.
 >
-> STATUS 2026-09-13: P0 + P1 + P2-1-venue + P2-2 + P2-4 DONE (69 tests). OANDA practice adapter live with mechanical guards; real-money host refused. Next: P2-5 feeds (P2-3 licensing when selling nears).
+> STATUS 2026-09-14: P0 + P1 + P2-1-venue + P2-2 + P2-4 + P2-5 + P2-6 DONE (95 tests). Tier 2 router (rule + LLM brains) live. Left: P2-3 licensing when selling nears; follow-ups below.
 
 ## Global rules (obey on every task)
 
@@ -118,13 +118,41 @@ tasks with timeouts + cooldowns — the zero-latency principle.
   follow-up); marks between reconciles are feed-provided (venue pricing
   feed is future work); second venue not started.
   Verify: `cargo test -p broker-oanda` (8 + 1 ignored) green.
-- `P2-5` World-info feeds, one crate each implementing `NewsFeed`:
-  economic calendar first (rates/CPI/NFP drive FX more than headlines),
-  then headline APIs (e.g. Finnhub/AlphaVantage-style) with LLM
-  sentiment scoring behind the existing `strategy-llm` pattern. Feed
-  failures degrade to neutral (like the LLM cooldown) and never block
-  trading. Powers the P1-2 news-gate (pause/reduce into high-impact
-  events) and the LLM router.
+- `P2-5` World-info feeds ✅ DONE (calendar + gate; headline APIs follow-up).
+  Landed: `news-calendar` — free keyless ForexFactory weekly JSON →
+  `NewsFeed` (event-time items, sentiment always None by honesty rule),
+  impact ordering with unknown→High fail-closed, hourly cache with
+  dedup, death degrades to silence; `CalendarGate` decorator in
+  `strategy-indicators` (owns feed, throttled 50-tick refresh,
+  currencies from agent symbol, ±window suppression of High/Holiday).
+  Config `calendar_gated{inner, window_minutes}` (recursive, LLM-gated
+  at depth); builder arm + `contains_llm` updated.
+  E2E (real egress here): ignored live-fetch test passes (0.22s);
+  live 15-tick run with calendar-gated Donchian fetched the real week
+  and traded through an empty window correctly.
+  Open follow-up: headline APIs (RSS/Finnhub-style, key-gated) with LLM
+  sentiment scoring behind the `strategy-llm` pattern; gate-suppression
+  event kind for log visibility.
+  Verify: `cargo test -p news-calendar` (5 + 1 ignored) + indicators (18) green.
+- `P2-6` Tier 2 regime router ✅ DONE (works with AND without LLMs).
+  Landed: `strategy-router` — `RouterBrain` trait with `RuleRouter`
+  (deterministic drift/vol classifier, the DEFAULT brain: no key, no
+  network) and `LlmRouter` (regime pick with threshold→cooldown, 8s
+  bound); `RouterStrategy` chains LLM pick (validated) → rule pick →
+  default, warm-keeps all candidates, reports `active_strategy()`.
+  Core trait gained the `active_strategy()` default hook; Hybrid
+  delegates to the deciding side; Agent emits `RegimeSelected` on change
+  (persisted as `regime_selected` for attribution). Config
+  `router{candidates, default, trending, ranging, trend_window, llm?}`
+  with `validate()` (dangling names skip loudly) + `requires_llm_key()`
+  (router never requires — degrades; live forces the rule brain and
+  router-with-llm specs stay skipped in live). Builder Hybrid-wraps
+  every router with a rebuilt-default fallback.
+  E2E (no key): 40-tick rule-router run switched mr/tr on regime with
+  `🧭 regime →` lines and candidate orders. Known behavior: classifier
+  is twitchy on random-walk noise (switches every few ticks) — switch
+  debounce/hysteresis is the follow-up, not a defect.
+  Verify: router (9) + agent regime (2) + config (2) + builder (2) green.
 
 ## Explicit non-goals (do NOT do in P0/P1)
 

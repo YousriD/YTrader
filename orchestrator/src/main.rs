@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use strategy_hybrid::HybridStrategy;
-use strategy_indicators::{AtrSizer, DonchianBreakout, NewsGate, Rsi};
+use strategy_indicators::{AtrSizer, CalendarGate, DonchianBreakout, NewsGate, Rsi};
 use strategy_llm::LlmStrategy;
+use strategy_router::{LlmRouter, RouterStrategy, RuleRouter};
 use strategy_sma::SmaCrossover;
 use tokio::sync::{broadcast, mpsc};
 use trading_config::{AgentSpec, Mode, RunConfig, StrategySpec};
@@ -166,17 +167,23 @@ async fn main() {
     let mut agents: Vec<Agent> = Vec::new();
 
     for spec in &config.agents {
-        // Defense-in-depth (constraint #2): unreachable while live
-        // hard-exits above, kept so a future live broker can't
-        // accidentally construct an LLM strategy. Detects nesting.
+        // Live protection: practice runs DO reach this loop, so any
+        // LLM anywhere in a strategy tree is skipped here, at any
+        // nesting depth. Keyless agents are handled just below.
         if contains_llm(&spec.strategy) && is_live {
             println!("Skipping '{}' — LLM-driven agents are not permitted in live mode.", spec.id);
             continue;
         }
-        // LLM anywhere in the (possibly nested) strategy tree disqualifies
-        // keyless agents here; live mode is refused wholesale above.
-        if contains_llm(&spec.strategy) && std::env::var("ANTHROPIC_API_KEY").is_err() {
+        // Hard requirements first: an agent that NEEDS an LLM key
+        // (bare Llm, or LLM nested under sizing/gates — but NOT a
+        // router, which degrades to its rule brain) is skipped keyless.
+        // Then structural validation (router mappings must resolve).
+        if spec.strategy.requires_llm_key() && std::env::var("ANTHROPIC_API_KEY").is_err() {
             println!("Skipping '{}' — ANTHROPIC_API_KEY not set.", spec.id);
+            continue;
+        }
+        if let Err(e) = spec.strategy.validate() {
+            eprintln!("Skipping '{}' — invalid strategy spec: {e}.", spec.id);
             continue;
         }
 
@@ -187,13 +194,17 @@ async fn main() {
         };
         let max_units = spec.max_position_units.unwrap_or(spec.units);
         let llm_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        // Live mode never constructs LLM brains: pass None so routers
+        // (and only routers — bare Llm agents are skipped above) run
+        // their deterministic rule brain. Defense-in-depth, explicit.
+        let llm_key_live_aware = if is_live { None } else { llm_key.as_deref() };
         let strategy = build_strategy(
             &spec.strategy,
             &spec.id,
             spec.units,
             spec.allow_pyramid,
             max_units,
-            llm_key.as_deref(),
+            llm_key_live_aware,
         );
 
         let mut agent = match snapshots.get(&spec.id) {
@@ -464,7 +475,14 @@ fn apply_venue_economics(mut broker: PaperBroker, spec: &AgentSpec) -> PaperBrok
 fn contains_llm(spec: &StrategySpec) -> bool {
     match spec {
         StrategySpec::Llm { .. } => true,
-        StrategySpec::Atr { inner, .. } | StrategySpec::NewsGated { inner, .. } => contains_llm(inner),
+        // A router WITH an llm section counts as LLM-containing (skipped
+        // in live): no silent brain-swaps with money — remove the section
+        // to explicitly choose the rule brain. A router without one is
+        // pure code and runs anywhere.
+        StrategySpec::Router { llm, .. } => llm.is_some(),
+        StrategySpec::Atr { inner, .. }
+        | StrategySpec::NewsGated { inner, .. }
+        | StrategySpec::CalendarGated { inner, .. } => contains_llm(inner),
         _ => false,
     }
 }
@@ -517,6 +535,64 @@ fn build_strategy(
             *cooldown_ticks,
             *sentiment_threshold,
         )),
+        StrategySpec::CalendarGated { inner, window_minutes } => Box::new(CalendarGate::new(
+            build_strategy(inner, name, units, allow_pyramid, max_units, llm_key),
+            name,
+            *window_minutes,
+        )),
+        StrategySpec::Router { candidates, default, trending, ranging, trend_window, llm } => {
+            let mut built: HashMap<String, Box<dyn trading_core::Strategy>> = HashMap::new();
+            for (cname, cspec) in candidates {
+                built.insert(
+                    cname.clone(),
+                    build_strategy(cspec, &format!("{name}-{cname}"), units, allow_pyramid, max_units, llm_key),
+                );
+            }
+            let regimes = HashMap::from([
+                ("trending".to_string(), trending.clone()),
+                ("ranging".to_string(), ranging.clone()),
+            ]);
+            // Brain choice, logged: LLM only with spec + key (caller
+            // forces None in live mode); otherwise the deterministic
+            // rule brain. Either way the chain ends at tested candidates.
+            let router = if let (Some(l), Some(key)) = (llm, llm_key) {
+                println!("{name}: router brain = llm (rule fallback armed)");
+                RouterStrategy::new(
+                    name,
+                    Box::new(LlmRouter::new(format!("{name}-router-llm"), key.to_string(), l.eval_every_n_ticks)),
+                    built,
+                    regimes,
+                    default.clone(),
+                    *trend_window,
+                )
+            } else {
+                if llm.is_some() {
+                    println!("{name}: router brain = rules (no LLM key)");
+                }
+                RouterStrategy::new(
+                    name,
+                    Box::new(RuleRouter::new(*trend_window)),
+                    built,
+                    regimes,
+                    default.clone(),
+                    *trend_window,
+                )
+            };
+            // Every LLM-touching strategy goes through the hybrid
+            // algorithmic fallback. Rebuild the default candidate for it.
+            let fallback_spec = candidates
+                .get(default)
+                .expect("router default validated before build");
+            let fallback = build_strategy(
+                fallback_spec,
+                &format!("{name}-fallback"),
+                units,
+                allow_pyramid,
+                max_units,
+                llm_key,
+            );
+            Box::new(HybridStrategy::new(name, Box::new(router), fallback))
+        }
         StrategySpec::Llm { persona, fallback_fast, fallback_slow } => {
             let api_key = llm_key
                 .expect("LLM agent without ANTHROPIC_API_KEY (caller must skip first)")
@@ -532,8 +608,7 @@ fn build_strategy(
 fn print_event(agent_id: &str, tick: u32, event: &AgentEvent) {
     match event {
         AgentEvent::Tick { .. } => {}
-        AgentEvent::OrderPlaced { order, price } => println!("[t{tick}] {agent_id} placed order: {order:?} @ {price:.5}"),
-        AgentEvent::OrderRejected(reason) => println!("[t{tick}] {agent_id} order rejected: {reason}"),
+        AgentEvent::OrderPlaced { order, price } => println!("[t{tick}] {agent_id} placed order: {order:?} @ {price:.5}"),        AgentEvent::OrderRejected(reason) => println!("[t{tick}] {agent_id} order rejected: {reason}"),
         AgentEvent::StopLossHit { price, move_pct, closed_units } => {
             println!("[t{tick}] 🛑 {agent_id} STOP-LOSS at {price:.5} ({:.2}%, {closed_units} units)", move_pct * 100.0)
         }
@@ -542,6 +617,9 @@ fn print_event(agent_id: &str, tick: u32, event: &AgentEvent) {
         }
         AgentEvent::Split { withdrawn, new_baseline } => {
             println!("[t{tick}] 🎉 {agent_id} DOUBLED — withdrawing ${withdrawn:.2}, continuing with ${new_baseline:.2}")
+        }
+        AgentEvent::RegimeSelected { strategy } => {
+            println!("[t{tick}] 🧭 {agent_id} regime → {strategy}")
         }
         AgentEvent::Died { final_balance } => println!("[t{tick}] 💀 {agent_id} DIED — final balance ${final_balance:.2}"),
     }
@@ -563,6 +641,9 @@ fn persist_event(log: &EventLog, run_id: &str, agent_id: &str, tick: u32, event:
         }
         AgentEvent::Split { withdrawn, new_baseline } => {
             ("split", serde_json::json!({ "withdrawn": withdrawn, "new_baseline": new_baseline }))
+        }
+        AgentEvent::RegimeSelected { strategy } => {
+            ("regime_selected", serde_json::json!({ "strategy": strategy }))
         }
         AgentEvent::Died { final_balance } => ("died", serde_json::json!({ "final_balance": final_balance })),
     };
@@ -625,6 +706,57 @@ mod tests {
             max_units: 500.0,
         };
         assert!(contains_llm(&nested));
+        // Calendar gate nests too — an LLM under it must still be found.
+        let cal = StrategySpec::CalendarGated {
+            inner: Box::new(StrategySpec::Sma { fast: 5, slow: 20 }),
+            window_minutes: 30,
+        };
+        assert!(!contains_llm(&cal));
+    }
+
+    #[test]
+    fn builds_calendar_gated_stack() {
+        let spec = StrategySpec::CalendarGated {
+            inner: Box::new(StrategySpec::Donchian { channel: 20 }),
+            window_minutes: 30,
+        };
+        let s = build_strategy(&spec, "cal", 100.0, false, 100.0, None);
+        assert!(s.name().contains("cal"));
+        assert!(s.is_healthy());
+    }
+
+    fn router_spec(with_llm: bool) -> StrategySpec {
+        StrategySpec::Router {
+            candidates: HashMap::from([
+                ("mr".to_string(), Box::new(StrategySpec::Rsi {
+                    period: 14, overbought: 70.0, oversold: 30.0,
+                })),
+                ("tr".to_string(), Box::new(StrategySpec::Donchian { channel: 20 })),
+            ]),
+            default: "mr".to_string(),
+            trending: "tr".to_string(),
+            ranging: "mr".to_string(),
+            trend_window: 20,
+            llm: with_llm.then(|| trading_config::RouterLlmSpec { eval_every_n_ticks: 10 }),
+        }
+    }
+
+    #[test]
+    fn builds_rule_router_without_key() {
+        // No llm section, no key: pure-code brain, Hybrid-wrapped.
+        let s = build_strategy(&router_spec(false), "rr", 100.0, false, 100.0, None);
+        assert!(s.name().contains("rr"));
+        assert!(s.is_healthy());
+    }
+
+    #[test]
+    fn builds_llm_router_without_network() {
+        // Construction performs no I/O; the key is only used per-tick.
+        let spec = router_spec(true);
+        assert!(!spec.requires_llm_key()); // degrades: never required
+        assert!(contains_llm(&spec)); // ...but still flagged for live gating
+        let s = build_strategy(&spec, "rl", 100.0, false, 100.0, Some("k"));
+        assert!(s.name().contains("rl"));
     }
 
     #[test]

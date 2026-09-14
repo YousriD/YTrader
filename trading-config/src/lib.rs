@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -24,9 +25,88 @@ pub enum StrategySpec {
     /// News gate around any inner strategy: suppresses entries for
     /// `cooldown_ticks` after news with `|sentiment| >= threshold`.
     NewsGated { inner: Box<StrategySpec>, cooldown_ticks: u32, sentiment_threshold: f64 },
+    /// Calendar gate around any inner strategy: suppresses entries while
+    /// a high-impact calendar event for either traded currency is within
+    /// ±`window_minutes` of now. Currencies derive from the agent symbol.
+    CalendarGated { inner: Box<StrategySpec>, window_minutes: u32 },
+    /// Tier 2 regime router (P2-6): picks one tested candidate per tick.
+    /// Works WITHOUT any key (deterministic rule brain); with `llm` set
+    /// AND `ANTHROPIC_API_KEY` present it asks an LLM first and falls
+    /// back to the rule brain. Unknown picks fall back to `default`.
+    Router {
+        candidates: HashMap<String, Box<StrategySpec>>,
+        default: String,
+        /// Candidate name for trending markets.
+        trending: String,
+        /// Candidate name for range markets.
+        ranging: String,
+        /// Lookback for the rule brain's drift/vol classifier.
+        #[serde(default = "default_trend_window")]
+        trend_window: usize,
+        /// Present = LLM brain eligible (still needs the env key).
+        #[serde(default)]
+        llm: Option<RouterLlmSpec>,
+    },
     /// LLM-driven, always wrapped in a Hybrid with an SMA fallback.
     /// Requires ANTHROPIC_API_KEY at runtime, else the agent is skipped.
     Llm { persona: String, fallback_fast: usize, fallback_slow: usize },
+}
+
+/// LLM-brain options for `StrategySpec::Router`. Key comes from
+/// `ANTHROPIC_API_KEY` env, never from config.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RouterLlmSpec {
+    #[serde(default = "default_eval_every")]
+    pub eval_every_n_ticks: u32,
+}
+
+fn default_trend_window() -> usize {
+    20
+}
+
+fn default_eval_every() -> u32 {
+    10
+}
+
+impl StrategySpec {
+    /// Structural validation beyond parsing: every name a router maps
+    /// must resolve to a built candidate (recursively). Called by the
+    /// orchestrator; invalid agents are skipped loudly, never half-built.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            StrategySpec::Router { candidates, default, trending, ranging, .. } => {
+                if !candidates.contains_key(default) {
+                    return Err(format!("router default '{default}' is not a candidate"));
+                }
+                for (regime, name) in [("trending", trending), ("ranging", ranging)] {
+                    if !candidates.contains_key(name) {
+                        return Err(format!("router {regime} target '{name}' is not a candidate"));
+                    }
+                }
+                for (name, sub) in candidates {
+                    sub.validate().map_err(|e| format!("candidate '{name}': {e}"))?;
+                }
+                Ok(())
+            }
+            StrategySpec::Atr { inner, .. }
+            | StrategySpec::NewsGated { inner, .. }
+            | StrategySpec::CalendarGated { inner, .. } => inner.validate(),
+            _ => Ok(()),
+        }
+    }
+
+    /// True when this tree CANNOT run without an LLM key. Router trees
+    /// degrade to the rule brain, so they never require one.
+    pub fn requires_llm_key(&self) -> bool {
+        match self {
+            StrategySpec::Llm { .. } => true,
+            StrategySpec::Atr { inner, .. }
+            | StrategySpec::NewsGated { inner, .. }
+            | StrategySpec::CalendarGated { inner, .. } => inner.requires_llm_key(),
+            StrategySpec::Router { .. } => false,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -173,6 +253,56 @@ strategy = {strategy}
         )).unwrap();
         assert!(cfg.agents[0].allow_pyramid);
         assert_eq!(cfg.agents[0].max_position_units, Some(250.0));
+    }
+
+    #[test]
+    fn parses_calendar_gated_nesting() {
+        let cfg: RunConfig = toml::from_str(&agent_toml(
+            r#"{ kind = "calendar_gated", inner = { kind = "donchian", channel = 20 }, window_minutes = 30 }"#,
+            "",
+        )).unwrap();
+        assert!(matches!(cfg.agents[0].strategy, StrategySpec::CalendarGated { window_minutes: 30, .. }));
+    }
+
+    #[test]
+    fn parses_router_with_rule_brain_only() {
+        // NOTE: TOML inline tables are single-line by spec.
+        let cfg: RunConfig = toml::from_str(&agent_toml(
+            r#"{ kind = "router", default = "mr", candidates = { mr = { kind = "rsi", period = 14, overbought = 70.0, oversold = 30.0 }, tr = { kind = "donchian", channel = 20 } }, trending = "tr", ranging = "mr" }"#,
+            "",
+        )).unwrap();
+        let StrategySpec::Router { llm, trend_window, .. } = &cfg.agents[0].strategy else {
+            panic!("expected router");
+        };
+        assert!(llm.is_none());
+        assert_eq!(*trend_window, 20); // serde default
+        assert!(!cfg.agents[0].strategy.requires_llm_key()); // runs keyless
+        cfg.agents[0].strategy.validate().unwrap();
+    }
+
+    #[test]
+    fn router_validation_rejects_dangling_names() {
+        let bad = StrategySpec::Router {
+            candidates: HashMap::from([("a".to_string(), Box::new(StrategySpec::Sma { fast: 5, slow: 20 }))]),
+            default: "missing".to_string(),
+            trending: "a".to_string(),
+            ranging: "a".to_string(),
+            trend_window: 20,
+            llm: None,
+        };
+        assert!(bad.validate().is_err());
+        assert!(!bad.requires_llm_key());
+        let llm_nested = StrategySpec::Atr {
+            inner: Box::new(StrategySpec::Llm {
+                persona: "x".to_string(),
+                fallback_fast: 5,
+                fallback_slow: 20,
+            }),
+            period: 14,
+            risk_pct: 0.02,
+            max_units: 500.0,
+        };
+        assert!(llm_nested.requires_llm_key());
     }
 
     #[test]

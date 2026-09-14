@@ -10,9 +10,11 @@
 | `broker-paper` | `broker-paper/src/lib.rs` | Simulated fills. | `PaperBroker::new()` / `restore()`, `with_max_leverage()` (1x), venue: `with_min_units/notional/commission/spread_pips`, `place_order()`, `withdraw()` (12 tests) |
 | `broker-oanda` | `broker-oanda/src/lib.rs` | P2-4 REAL adapter, practice-host only. | `OandaBroker::new(url, key, account, symbol)`, `is_practice_url()`, `parse_fill/parse_balance/parse_position/parse_mid/map_api_error`, genuine `reconcile()`, `withdraw()` always errors (8 tests + 1 ignored live) |
 | `feed-mock` | `feed-mock/src/lib.rs` | Random-walk prices. | `MockFeed::new(start_price, vol)`, `next_price()` |
-| `news-mock` | `news-mock/src/lib.rs` | Fake headlines. | `MockNewsFeed::new(every_n_ticks)`, `next_headline()` |
+| `news-mock` | `news-mock/src/lib.rs` | Fake headlines. | `MockNewsFeed::new(every_n_ticks)`, `next_headline()` (global fan-out; no attribution) |
+| `news-calendar` | `news-calendar/src/lib.rs` | P2-5 REAL calendar (keyless weekly JSON). | `CalendarFeed` (hourly cache, dedup, degrades silent), `parse_calendar()`, `Impact`, `CalendarEvent`, `fetch_events()` (5 tests + 1 ignored live) |
 | `strategy-sma` | `strategy-sma/src/lib.rs` | SMA crossover baseline, inventory-guarded. | `SmaCrossover::new(name, fast, slow, units)`, `with_inventory()`, `decide()` |
-| `strategy-indicators` | `strategy-indicators/src/` | P1-2 registry: RSI, Donchian, ATR sizer, news gate + shared guards. | `Rsi`, `DonchianBreakout`, `AtrSizer`, `NewsGate`, `inventory::{pyramid_blocked, clamp_units}` (14 tests) |
+| `strategy-indicators` | `strategy-indicators/src/` | P1-2 registry + P2-5 calendar gate. | `Rsi`, `DonchianBreakout`, `AtrSizer`, `NewsGate`, `CalendarGate` (`currencies_of`, `suppressed`), `inventory` guards (18 tests) |
+| `strategy-router` | `strategy-router/src/` | P2-6 Tier 2 router, dual-brain. | `RouterBrain`, `RuleRouter` (drift/vol classifier), `LlmRouter` (cooldown), `RouterStrategy` (validate→rule→default chain, warm-keeping, `active_strategy`) (9 tests) |
 | `strategy-llm` | `strategy-llm/src/lib.rs` | LLM every N ticks. | `LlmStrategy::new(name, api_key, units, persona)`, `ask_claude()`, `decide()`, `is_healthy()` |
 | `strategy-hybrid` | `strategy-hybrid/src/lib.rs` | LLM + SMA fallback. | `HybridStrategy::new(name, primary, fallback)`, `decide()` |
 | `agent-runtime` | `agent-runtime/src/lib.rs` | Lifecycle + risk layer. | `Agent::new()`, `Agent::restore()`, `baseline()`, `with_stop_loss()`, `with_take_profit()`, `reconcile()`, `check_risk_exits()` (:109), `on_tick()` (:144), split-withdraw at :194-215, `AgentEvent`, `AgentStatus`. Tests (7). |
@@ -91,8 +93,8 @@ strategy = { kind = "sma", fast = 5, slow = 20 }
 - `G1` FIXED P1-3: one feed per distinct symbol (`symbols_of()`); same-symbol agents share a walk, symbols never cross. News still fanned out globally (mock has no attribution).
 - `G2` FIXED P1-3: `Lagged(n)` counted per agent, printed + persisted as `tick_lag`, totals in final report (`lagged=i/t`). Still hits slow LLM agents first (8s timeout).
 - `G3` Money is `f64` everywhere. No decimal type. Tests compare with tolerance, never `==`.
-- `G4` Tests (2026-09-13): 69 green — 12 broker-paper + 8 broker-oanda (+1 ignored live) + 7 agent-runtime + 3 persistence + 14 strategy-indicators + 4 trading-config + 3 orchestrator + 1 resume-e2e + 17 analytics. Still no strategy-llm/hybrid/feed/news tests.
-- `G9` Log fill shapes (P2-2): `order_placed{price}`, `stop_loss/take_profit_hit{closed_units}`. Reconstruction mirrors broker average-cost matching; snapshots re-seed it; orphan closes counted, never invented.
+- `G4` Tests: 95 green — 12 broker-paper + 8 broker-oanda (+1 ignored live) + 9 agent-runtime + 3 persistence + 18 strategy-indicators + 7 trading-config + 6 orchestrator + 1 resume-e2e + 17 analytics + 5 news-calendar (+1 ignored live) + 9 strategy-router. Still no strategy-llm/hybrid/feed-mock/news-mock tests.
+- `G9` Log fill shapes (P2-2) + regime events (P2-6): `order_placed{price}`, `stop_loss/take_profit_hit{closed_units}`, `regime_selected{strategy}`. Reconstruction mirrors broker average-cost matching; snapshots re-seed it; orphan closes counted, never invented.
 - `G5` FIXED P0-2: split calls `broker.withdraw()`, baseline = post-withdraw equity. Defers (OrderRejected) while profit is unrealized — see `split_defers_while_profit_is_unrealized` test.
 - `G6` FIXED P0-1: margin check is exposure-based both sides (closes always pass). 1x default via `with_max_leverage()`.
 - `G7` FIXED P0-1: flip resets `avg_entry_price` to flip fill; partial close keeps old avg.

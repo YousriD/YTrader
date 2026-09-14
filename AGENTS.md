@@ -30,7 +30,8 @@ Run output: console + `data/run-<timestamp>.jsonl` (append-only; snapshots every
 
 - Keep `core/src/lib.rs` trait shape. Add trait methods with defaults only.
 - Risk layer (`agent-runtime/src/lib.rs:109 check_risk_exits`) runs before strategy — never bypass.
-- P0 + P1 + P2-1-venue + P2-2 + P2-4 are DONE (69 tests). Work P2-5 feeds next (licensing when selling nears). Live = OANDA practice only; trade host refused mechanically.
+- LLM invariant (all present and future LLM touchpoints — router, tuners, scorers): deterministic default + degrade loudly (log it) + bounded call time (timeout/cooldown) + never inside the risk layer. Anything proposed without all four is rejected as Tier 4.
+- P0 + P1 + P2-1-venue + P2-2 + P2-4 + P2-5 + P2-6 are DONE (95 tests). Left: P2-3 licensing when selling nears; follow-ups (headline APIs, ATR margin-awareness, router debounce, LLM-brain live-fire). Live = OANDA practice only; trade host refused mechanically.
 - Money is `f64` — do not migrate to decimal without a P2 task.
 - After every edit: `cargo test` + `cargo build -p orchestrator`. Update `docs/CODEMAP.md` if behavior changed.
 
@@ -41,9 +42,11 @@ Run output: console + `data/run-<timestamp>.jsonl` (append-only; snapshots every
 | Fix fills/margin | `broker-paper/src/lib.rs:44-148`, `core/src/lib.rs:102-130`, `docs/PLAN.md:P0-1` |
 | Venue economics | `broker-paper/src/lib.rs` (`with_min_*`, commission, spread), `trading-config/src/lib.rs` (agent knobs), `docs/PLAN.md:P2-1` |
 | Analytics/gate | `analytics/src/` (reconstruction, metrics, thresholds), `agent-runtime/src/lib.rs` (fill log shapes), `docs/PLAN.md:P2-2` |
+| Regime router | `strategy-router/src/` (rule + LLM brains), `trading-config` (`Router` spec), `docs/PLAN.md:P2-6` |
 | Fix split/death | `agent-runtime/src/lib.rs:144-215`, `docs/PLAN.md:P0-2` |
 | Fix live-gate | `orchestrator/src/main.rs:56-105`, `trading-config/src/lib.rs:35-46`, `docs/PLAN.md:P0-3` |
 | Venue adapter | `broker-oanda/src/lib.rs` (practice-only, reconcile, error map), `docs/PLAN.md:P2-4` |
+| Info feeds | `news-calendar/src/lib.rs` (weekly JSON, impact filter), `strategy-indicators/src/gate.rs` (`CalendarGate`), `docs/PLAN.md:P2-5` |
 | Add tests | `broker-paper/src/lib.rs`, `agent-runtime/src/lib.rs`, `docs/PLAN.md:P0-4` |
 | Crash recovery | `persistence/src/lib.rs:57`, `agent-runtime/src/lib.rs:100-104`, `docs/PLAN.md:P1-1` |
 | SMA inventory | `strategy-sma/src/lib.rs`, `strategy-indicators/src/` (registry), `docs/PLAN.md:P1-2` |

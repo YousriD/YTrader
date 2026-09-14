@@ -1,18 +1,74 @@
-# Autonomous FX Trading System — MVP
+<p align="center">
+  <img src="assets/ytrader-logo.svg" alt="YTrader logo" width="420">
+</p>
 
-A Rust workspace built to scale: every external dependency (broker, price
-feed, news source, strategy "brain") sits behind a trait in `core`. This
-MVP wires up mock/paper implementations of all of them end-to-end so you
-can run the full agent lifecycle — spawn, trade, die at zero, split at
-double — today, with zero external accounts or API keys required.
+<p align="center">
+  <strong>YTrader — a Rust-native multi-agent FX trading laboratory</strong><br>
+  Compose independent strategies, enforce risk outside the strategy layer,
+  resume from snapshots, and measure results before touching a practice account.
+</p>
+
+<p align="center">
+  <a href="https://github.com/YousriD/YTrader/stargazers"><img src="https://img.shields.io/github/stars/YousriD/YTrader?style=social" alt="GitHub stars"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/built_with-Rust-orange?logo=rust" alt="Built with Rust"></a>
+  <a href="https://github.com/YousriD/YTrader"><img src="https://img.shields.io/github/last-commit/YousriD/YTrader" alt="Last commit"></a>
+</p>
+
+YTrader is an educational, paper-first workspace for experimenting with
+multi-agent trading infrastructure. Every external dependency — broker, price
+feed, news source, and strategy "brain" — sits behind a trait in `core`. Run
+the full agent lifecycle locally with no external accounts or API keys
+required, then use analytics and an OANDA practice adapter as deliberate
+promotion steps.
+
+> **This is not investment advice and it does not claim to be profitable.**
+> YTrader is a transparent engineering laboratory for broker semantics,
+> risk controls, persistence, strategy composition, and measurable evaluation.
+
+## Why YTrader?
+
+| Capability | YTrader |
+|---|---:|
+| Independent agents running in parallel | Yes |
+| Rust-native extension points | Yes |
+| Risk layer outside the strategy | Yes |
+| Config-driven strategy registry | Yes |
+| Paper margin and venue economics | Yes |
+| Snapshot-based crash resume | Yes |
+| Offline performance and promotion gate | Yes |
+| OANDA practice integration | Yes |
+| Real-money execution | Intentionally disabled |
+
+The project favors honest semantics over impressive-looking backtests:
+paper fills model exposure margin, spread, commission, minimums, and
+cash-only withdrawals; analytics can reject a run instead of marketing it.
+
+## See it run
+
+The default configuration starts multiple agents, emits events, and writes an
+append-only run log:
+
+```text
+$ cargo run -p orchestrator
+
+algo-fast: OrderPlaced Buy EUR_USD
+algo-slow: OrderRejected insufficient margin
+algo-fast: StopLoss EUR_USD
+algo-fast: Split withdrawn=50% baseline reset
+Final algo-fast: equity=... lagged=0/0
+```
+
+Your prices and outcomes will differ because the mock feed is stochastic.
+That is intentional: use the output to inspect lifecycle behavior, not to
+cherry-pick a profitable run.
 
 ## Quick start
 
 ```bash
 cargo build -p orchestrator
-cargo test                         # 14 tests green (8 broker-paper + 6 agent-runtime)
-cargo run -p orchestrator            # reads ./config.toml by default
-cargo run -p orchestrator my-config.toml   # or point at a specific file
+cargo test
+cargo run -p orchestrator          # reads ./config.toml by default
+cargo run -p orchestrator my-config.toml
 ```
 
 Agents are now defined entirely in `config.toml` — no code changes or
@@ -36,10 +92,68 @@ broker/baseline state from the newest log instead of fresh stakes:
 cargo run -p orchestrator -- config.toml --resume
 ```
 
-> **Build status:** `cargo build -p orchestrator` and `cargo test` pass.
-> Workspace `chrono` dep carries the `serde` feature (required for
-> `DateTime<Utc>` in `Candle`/`NewsItem`/`EventRecord`).
-> `mode = "live"` refuses to run until a real broker exists (see below).
+Analyze a completed run without affecting execution:
+
+```bash
+cargo run -p analytics -- report data/run-<timestamp>.jsonl
+cargo run -p analytics -- gate data/run-<timestamp>.jsonl
+cargo run -p analytics -- track data/run-<timestamp>.jsonl
+```
+
+`mode = "live"` is a guarded OANDA **practice-mode** path. The trade host,
+missing credentials, shared symbols, or a failed opening reconcile abort the
+run. Paper mode remains the default.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Config[config.toml] --> Orchestrator
+    Orchestrator --> Feeds[Market and news feeds]
+    Orchestrator --> Agents[Parallel agents]
+    Agents --> Strategy[Composable strategy]
+    Agents --> Risk[Stop-loss and take-profit]
+    Risk --> Broker[Broker trait]
+    Broker --> Paper[Paper broker]
+    Broker --> Practice[OANDA practice adapter]
+    Agents --> Log[JSONL event log]
+    Log --> Resume[Snapshot resume]
+    Log --> Analytics[Offline analytics gate]
+```
+
+The important boundary is `Strategy -> Risk -> Broker`: strategies decide,
+the runtime owns safety exits, and brokers own fills and account semantics.
+This keeps an unavailable LLM from bypassing risk controls and lets new
+strategies or venues plug into the same lifecycle.
+
+## Feature status
+
+| Feature | Status |
+|---|---|
+| Paper broker with exposure margin | Done |
+| Stop-loss, take-profit, death, and split lifecycle | Done |
+| SMA, RSI, Donchian, ATR, and news-gated strategies | Done |
+| Multi-symbol feeds and lag accounting | Done |
+| Snapshot resume and JSONL audit log | Done |
+| Performance report, tracker, and promotion gate | Done |
+| OANDA practice adapter with fail-closed reconcile | Done |
+| Economic-calendar feed and calendar gate | Done |
+| Headline APIs and LLM sentiment | Planned |
+| Real-money execution | Disabled by design |
+
+## Contributing
+
+Good first contributions include:
+
+- Add a `Strategy`, `MarketFeed`, or `NewsFeed` implementation.
+- Add property tests for broker fills, margin, or lifecycle transitions.
+- Improve analytics reports or add visualizations for run logs.
+- Add small, reproducible example configurations.
+- Improve documentation while preserving the paper-first safety boundary.
+
+Start with [`docs/CODEMAP.md`](docs/CODEMAP.md), then read
+[`docs/PLAN.md`](docs/PLAN.md) before changing runtime behavior. Run
+`cargo test` and `cargo build -p orchestrator` before opening a pull request.
 
 ## Workspace layout
 
@@ -50,8 +164,10 @@ cargo run -p orchestrator -- config.toml --resume
 | `broker-oanda` | REAL adapter, practice-host only: market orders, mirror + genuine `reconcile()`, hedged positions refused, key redacted in logs. 8 tests + 1 ignored live check. |
 | `feed-mock` | Random-walk price generator, no network needed. |
 | `news-mock` | Emits sample headlines with sentiment scores periodically. |
+| `news-calendar` | REAL economic calendar (free keyless weekly JSON): High-impact event times as headline items, failures degrade to silence. |
 | `strategy-sma` | Algorithmic baseline: fast/slow SMA crossover, inventory-guarded (no pyramiding by default). |
 | `strategy-indicators` | Registry: RSI mean-reversion, Donchian breakout, ATR volatility sizer, news gate — all sharing the same no-pyramid/size-clamp guards, composable per agent in `config.toml`. |
+| `strategy-router` | Tier 2 regime router: deterministic rule brain by default, optional LLM brain (degrades to rules), picks among tested candidates with warm-keeping; switches logged as regime events. |
 | `strategy-llm` | Calls an LLM every N ticks, with its own failure backoff/cooldown. |
 | `strategy-hybrid` | Wraps an LLM strategy with an algorithmic fallback — the "AI unreachable" guarantee lives here. |
 | `agent-runtime` | Agent lifecycle: stop-loss/take-profit risk layer (runs before strategy), die-at-zero, split-at-double via real `broker.withdraw()` (single-fire; defers while profit is unrealized), reconcile-on-startup hook. 6 unit tests. |
@@ -116,9 +232,10 @@ running alongside them.
    fail-closed). Ladder: internal paper → venue demo ($100 testbed,
    gate the log) → venue live, promoted only on green stats. Demo
    template + procedure in `config.toml` / `docs/PLAN.md:P2-4`.
-5. **Real world-info feeds** (`docs/PLAN.md:P2-5`): economic calendar
-   first (rates/CPI/NFP move FX most), then headline APIs with optional
-   LLM sentiment scoring (same pattern `strategy-llm` already uses).
+5. **Real world-info feeds — calendar DONE (P2-5).** `news-calendar`
+   reads the free keyless weekly calendar; `CalendarGate` suppresses
+   entries around High-impact events for the traded currencies.
+   Follow-up: headline APIs (key-gated) with LLM sentiment scoring.
    Feeds degrade to neutral on failure and never block trading.
 6. **Performance statistics + trackers — DONE (P2-2).** `cargo run -p
    analytics -- report|gate|track <run.jsonl>`: Sharpe, drawdown, win

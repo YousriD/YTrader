@@ -85,3 +85,14 @@ strategy = { kind = "llm", persona = "Cautious mean-reversion trader, avoids ove
 # stop_loss_pct = 0.005
 # take_profit_pct = 0.015
 # strategy = { kind = "atr", inner = { kind = "news_gated", inner = { kind = "donchian", channel = 20 }, cooldown_ticks = 5, sentiment_threshold = 0.5 }, period = 14, risk_pct = 0.02, max_units = 300.0 }
+#
+# Tier 2 regime router (P2-6): rule brain by default (no key needed),
+# LLM brain when [llm] is set AND ANTHROPIC_API_KEY is present.
+# Switches are logged as regime_selected events for attribution.
+# [[agents]]
+# id = "router"
+# symbol = "EUR_USD"
+# stake_min = 50.0
+# stake_max = 50.0
+# units = 20.0
+# strategy = { kind = "router", default = "mr", candidates = { mr = { kind = "rsi", period = 5, overbought = 70.0, oversold = 30.0 }, tr = { kind = "donchian", channel = 5 } }, trending = "tr", ranging = "mr", trend_window = 10 }

@@ -25,6 +25,10 @@ pub enum AgentEvent {
     /// trading with, so the milestone can be hit again.
     Split { withdrawn: f64, new_baseline: f64 },
     Died { final_balance: f64 },
+    /// A meta-strategy (router) switched its active candidate. Emitted
+    /// on change only, so analytics can attribute performance per
+    /// regime without log-spamming every tick.
+    RegimeSelected { strategy: String },
 }
 
 /// Wraps a Strategy + Broker pair with:
@@ -46,6 +50,7 @@ pub struct Agent {
     max_history: usize,
     stop_loss_pct: Option<f64>,
     take_profit_pct: Option<f64>,
+    last_active: Option<String>,
 }
 
 impl Agent {
@@ -69,6 +74,7 @@ impl Agent {
             max_history: 200,
             stop_loss_pct: None,
             take_profit_pct: None,
+            last_active: None,
         }
     }
 
@@ -213,6 +219,18 @@ impl Agent {
             }
         }
 
+        // Regime attribution (Tier 2): meta-strategies report their
+        // active candidate via the trait hook; emit on change only
+        // (including the first observation, so the starting regime is
+        // on record). Leaf strategies report None — nothing emitted.
+        let active = self.strategy.active_strategy().map(|s| s.to_string());
+        if active != self.last_active {
+            if let Some(ref name) = active {
+                events.push(AgentEvent::RegimeSelected { strategy: name.clone() });
+            }
+            self.last_active = active;
+        }
+
         let account = self.broker.account_state();
         if account.equity <= 0.0 {
             self.status = AgentStatus::Dead;
@@ -259,6 +277,26 @@ mod tests {
         }
         async fn decide(&mut self, _ctx: &MarketContext<'_>) -> Option<Order> {
             None
+        }
+    }
+
+    /// Meta-strategy stub: holds, but reports a scripted active candidate
+    /// per tick so regime events are testable without an LLM.
+    struct RegimeStub {
+        script: Vec<&'static str>,
+        tick: usize,
+    }
+    #[async_trait]
+    impl Strategy for RegimeStub {
+        fn name(&self) -> &str {
+            "regime-stub"
+        }
+        async fn decide(&mut self, _ctx: &MarketContext<'_>) -> Option<Order> {
+            self.tick += 1;
+            None
+        }
+        fn active_strategy(&self) -> Option<&str> {
+            self.script.get(self.tick.saturating_sub(1)).copied()
         }
     }
 
@@ -449,5 +487,41 @@ mod tests {
         assert_eq!(st.entry_price, Some(1.2));
         assert!((st.equity - 80.0).abs() < 1e-9);
         assert!(!has_split(&events), "no spurious split on restore: {events:?}");
+    }
+
+    #[tokio::test]
+    async fn regime_selected_emitted_on_change_only() {
+        let broker: Box<dyn Broker> = Box::new(PaperBroker::new(100.0));
+        let mut agent = Agent::new(
+            "t",
+            "EUR_USD",
+            Box::new(RegimeStub { script: vec!["rsi", "rsi", "donch"], tick: 0 }),
+            broker,
+            100.0,
+        );
+        let regimes = |events: &[AgentEvent]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::RegimeSelected { strategy } => Some(strategy.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Tick 1: first observation recorded. Tick 2: unchanged, silent.
+        // Tick 3: switch emitted.
+        assert_eq!(regimes(&agent.on_tick(candle(1.0)).await), vec!["rsi".to_string()]);
+        assert!(regimes(&agent.on_tick(candle(1.0)).await).is_empty());
+        assert_eq!(regimes(&agent.on_tick(candle(1.0)).await), vec!["donch".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn leaf_strategies_emit_no_regime_events() {
+        let broker: Box<dyn Broker> = Box::new(PaperBroker::new(100.0));
+        let mut agent = Agent::new("t", "EUR_USD", Box::new(Hold), broker, 100.0);
+        for _ in 0..3 {
+            let events = agent.on_tick(candle(1.0)).await;
+            assert!(events.iter().all(|e| !matches!(e, AgentEvent::RegimeSelected { .. })));
+        }
     }
 }

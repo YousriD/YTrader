@@ -154,6 +154,15 @@ pub trait Strategy: Send + Sync {
     fn is_healthy(&self) -> bool {
         true
     }
+    /// Currently-selected sub-strategy, for meta-strategies (routers)
+    /// that delegate to one candidate at a time. `None` for leaf
+    /// strategies. The agent layer watches this and emits a
+    /// `RegimeSelected` event on change so analytics can attribute
+    /// performance per regime. Additive default: existing strategies
+    /// are unaffected.
+    fn active_strategy(&self) -> Option<&str> {
+        None
+    }
 }
 
 // ---------- Run mode ----------

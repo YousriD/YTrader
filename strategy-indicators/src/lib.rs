@@ -15,6 +15,6 @@ pub mod rsi;
 pub mod sizing;
 
 pub use donchian::DonchianBreakout;
-pub use gate::NewsGate;
+pub use gate::{CalendarGate, NewsGate};
 pub use rsi::Rsi;
 pub use sizing::AtrSizer;

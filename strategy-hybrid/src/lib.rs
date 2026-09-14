@@ -42,6 +42,16 @@ impl Strategy for HybridStrategy {
         true
     }
 
+    fn active_strategy(&self) -> Option<&str> {
+        // Surface whichever side is actually deciding, so a router
+        // nested as primary stays visible through the hybrid wrapper.
+        if self.primary.is_healthy() {
+            self.primary.active_strategy()
+        } else {
+            self.fallback.active_strategy()
+        }
+    }
+
     async fn decide(&mut self, ctx: &MarketContext<'_>) -> Option<Order> {
         let primary_result = self.primary.decide(ctx).await;
         let fallback_healthy_path = !self.primary.is_healthy();

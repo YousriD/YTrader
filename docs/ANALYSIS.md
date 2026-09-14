@@ -1,6 +1,6 @@
-# ANALYSIS — TraderY — Verified 2026-09-13, updated post-P2-4 same day
+# ANALYSIS — TraderY — Verified 2026-09-14, updated post-P2-6 same day
 
-> For LLM agents: every claim below was checked against current source. Each A-item carries FIXED (with fix ref) or OPEN status. P0 + P1 + P2-1-venue + P2-2 + P2-4 DONE: 69 tests green.
+> For LLM agents: every claim below was checked against current source. Each A-item carries FIXED (with fix ref) or OPEN status. P0 + P1 + P2-1-venue + P2-2 + P2-4 + P2-5 + P2-6 DONE: 95 tests green.
 
 ## Verdict (1 paragraph)
 
@@ -56,4 +56,4 @@ Well-shaped MVP skeleton, not a trading system yet. Architecture (trait split, r
 - `M3` README live-warning inversion (A1) — docs actively mislead about risk direction.
 
 ## Bottom line for next LLM
-P0 + P1 + P2-1-venue + P2-2 + P2-4 DONE (69 tests). Next: P2-5 feeds (P2-3 licensing when selling nears). Live mode exists but ONLY against the OANDA practice host with fail-closed reconcile — the trade host is refused mechanically, and `gate` still blocks promotable claims.
+P0 + P1 + P2-1-venue + P2-2 + P2-4 + P2-5 + P2-6 DONE (95 tests). Left: P2-3 licensing when selling nears; follow-ups (headline APIs, ATR margin-awareness, router debounce, LLM-brain live-fire with key). Live = OANDA practice only; trade host refused mechanically.
